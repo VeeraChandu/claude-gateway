@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-gateway",
+  "version": "1.0.0",
+  "description": "Ultra-low-latency, zero-dependency gateway to run Claude Code with OpenAI or OpenAI-compatible models",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "dev": "node --watch --env-file=.env server.js"
+  },
+  "keywords": [
+    "claude-code",
+    "openai",
+    "llm-gateway",
+    "proxy"
+  ],
+  "author": "",
+  "license": "MIT"
+}
