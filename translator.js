@@ -16,6 +16,33 @@ function cleanSchema(schema) {
 }
 
 /**
+ * Map an OpenAI usage object onto Anthropic usage fields.
+ *
+ * OpenAI-compatible providers (Venice included) report `prompt_tokens` *inclusive*
+ * of cached tokens, exposed as `prompt_tokens_details.cached_tokens`. Anthropic
+ * reports `input_tokens` *excluding* cache reads and adds `cache_read_input_tokens`
+ * on top. Subtracting keeps the two consistent, so the total a client derives from
+ * input + cache_read + cache_creation still equals the provider's `prompt_tokens`.
+ */
+function anthropicUsage(usage) {
+  if (!usage) {
+    return {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    };
+  }
+  const cacheRead = usage.cache_read_input_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
+  return {
+    input_tokens: Math.max(0, (usage.prompt_tokens ?? 0) - cacheRead),
+    output_tokens: usage.completion_tokens ?? 0,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0
+  };
+}
+
+/**
  * Convert Anthropic /v1/messages request to OpenAI /v1/chat/completions payload
  */
 export function anthropicToOpenAI(anthropicBody, resolvedModel) {
@@ -216,6 +243,7 @@ export async function streamOpenAIToAnthropic(openAiStream, requestedModel, res,
   const toolCallMap = new Map(); // openAiIndex -> { anthropicIndex, id, name, stopped }
   let totalOutputTokens = 0;
   let totalInputTokens = 0;
+  let usageFromUpstream = null;
   let finishReason = "end_turn";
 
   const reader = openAiStream.getReader();
@@ -245,8 +273,9 @@ export async function streamOpenAIToAnthropic(openAiStream, requestedModel, res,
           }
 
           if (chunk.usage) {
-            if (chunk.usage.prompt_tokens !== undefined) totalInputTokens = chunk.usage.prompt_tokens;
-            if (chunk.usage.completion_tokens !== undefined) totalOutputTokens = chunk.usage.completion_tokens;
+            usageFromUpstream = anthropicUsage(chunk.usage);
+            totalInputTokens = usageFromUpstream.input_tokens;
+            totalOutputTokens = usageFromUpstream.output_tokens;
           }
 
           if (!messageStartSent) {
@@ -426,6 +455,10 @@ export async function streamOpenAIToAnthropic(openAiStream, requestedModel, res,
       }
     }
 
+    // Usage arrives in OpenAI's trailing chunk, well after the first content chunk
+    // triggered message_start — so message_start necessarily carries zeros. Anthropic's
+    // message_delta is allowed to restate usage, and clients apply those fields when
+    // present, which is the only point the real token counts can reach them.
     sendEvent("message_delta", {
       type: "message_delta",
       delta: {
@@ -433,7 +466,14 @@ export async function streamOpenAIToAnthropic(openAiStream, requestedModel, res,
         stop_sequence: null
       },
       usage: {
-        output_tokens: totalOutputTokens || 1
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens || 1,
+        ...(usageFromUpstream
+          ? {
+              cache_read_input_tokens: usageFromUpstream.cache_read_input_tokens,
+              cache_creation_input_tokens: usageFromUpstream.cache_creation_input_tokens
+            }
+          : {})
       }
     });
 
@@ -500,9 +540,6 @@ export function openAIToAnthropicNonStream(openAiData, requestedModel) {
     content,
     stop_reason,
     stop_sequence: null,
-    usage: {
-      input_tokens: openAiData.usage?.prompt_tokens || 0,
-      output_tokens: openAiData.usage?.completion_tokens || 0
-    }
+    usage: anthropicUsage(openAiData.usage)
   };
 }
