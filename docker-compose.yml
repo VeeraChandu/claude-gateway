@@ -7,9 +7,9 @@ services:
     container_name: claude-openai-gateway
     restart: unless-stopped
     ports:
-      - "${PORT:-8080}:8080"
+      - "${PORT:-5175}:5175"
     env_file:
       - .env
     environment:
       - HOST=0.0.0.0
-      - PORT=8080
+      - PORT=5175
