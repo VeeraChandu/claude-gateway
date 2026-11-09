@@ -167,6 +167,9 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 The snippet shown when you create a client key includes it. Restart Claude Code after changing your
 models. You can also skip the picker and run `claude --model <your-id>`.
 
+If the same gateway also serves Claude Desktop, keep those IDs free of vendor names such as
+`deepseek` or `gpt` — Desktop hides them. See [Claude Desktop](#claude-desktop).
+
 ### Model routing
 
 0. **Your models:** an exact ID match.
@@ -176,6 +179,81 @@ models. You can also skip the picker and run `claude --model <your-id>`.
    family's route, so new releases need no changes. Families without a route use the default.
    Point Haiku at a cheap model: Claude Code makes many small background calls with it.
 4. **Anything else** uses the default route.
+
+### Claude Desktop
+
+Claude Desktop (the app, not Claude Code) can also use this gateway, through its **third-party mode**.
+It's a separate instance with its own data directory and its own logs:
+
+| | |
+| :-- | :-- |
+| Config file | `~/Library/Application Support/Claude-3p/configLibrary/<id>.json` (macOS) |
+| Logs | `~/Library/Logs/Claude-3p/main.log` (macOS) |
+| Deployment mode | `deploymentMode: "3p"` in `~/Library/Application Support/Claude-3p/claude_desktop_config.json` |
+
+The config library is what the app's own third-party setup window writes, and each entry is a named
+config you can switch between. A minimal one for this gateway, using a client key from **Client keys**:
+
+```json
+{
+  "inferenceProvider": "gateway",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:8080",
+  "inferenceGatewayApiKey": "cgw_…",
+  "inferenceGatewayAuthScheme": "bearer",
+  "inferenceModels": [
+    { "name": "claude-sonnet-5", "labelOverride": "Sonnet 5 via gateway" }
+  ]
+}
+```
+
+Restart the app after editing. `inferenceGatewayAuthScheme` accepts `bearer` (the default, which sends
+`Authorization: Bearer <key>`) or `x-api-key`; this gateway accepts both. Leave
+`inferenceCredentialKind` out — it's only for the sign-in flows (`interactive`, `oauth`, …), and a
+value outside its enum makes the whole config invalid.
+
+Desktop reads the model list from `GET /v1/models` unless `inferenceModels` is set, in which case that
+list wins. Setting it explicitly is more predictable than relying on discovery.
+
+#### Model names: Desktop drops vendor names
+
+**Desktop silently discards any model ID containing a third-party vendor token.** Its filter keeps a
+row only if the ID matches a Claude family alias or contains `claude` / `anthropic` / a family name —
+*and* contains none of `deepseek`, `gemini`, `glm`, `gpt`, `grok`, `qwen`, `llama`, `mistral`,
+`nemotron`, `openai`, `codex`, `solar`, `mercury`, and about forty more. The check runs before
+`anthropic`/`claude` is considered, so a `claude-` prefix is **not** an exemption:
+
+| Model ID | Desktop | Claude Code |
+| :-- | :-- | :-- |
+| `claude-sonnet-5`, `claude-opus-5-5` | shown | shown |
+| `claude-venice-flash`, `claude-flash` | shown | shown |
+| `claude-deepseek-v4-1-flash` | **dropped** | shown |
+| `claude-nemotron-3-ultra` | **dropped** | shown |
+| `gpt-4.1`, `deepseek-chat` | **dropped** | shown (pass-through) |
+
+The same check validates IDs in `inferenceModels` and again when a session names a model, so
+`behavesAs` cannot rescue a dropped ID — an ID Desktop refuses at discovery is refused at use too.
+Only the model *ID* matters: the upstream model behind it is sent to your provider as-is. A route
+named `claude-venice-flash` pointed at `deepseek-v4-1-flash` works in both clients.
+
+So when you add rows under **Routing → Your models**, give Desktop-facing entries IDs that name no
+vendor. Claude Code's own gate is only "the ID contains `claude`", which is why a name like
+`claude-deepseek-v4-1-flash` can work in Claude Code and still show *Your organization hasn't
+configured any models* in Desktop.
+
+If Desktop shows that message, its log says why:
+
+```bash
+tail -20 ~/Library/Logs/Claude-3p/main.log
+```
+
+- `Gateway /v1/models returned 0 usable models { rawCount: 1 }` — the gateway answered and Desktop
+  dropped the row: it's a vendor name (above).
+- `Gateway /v1/models non-OK` — the client key is wrong, or the app can't reach the URL.
+- `Model discovery: 0 found … picker = 0 (empty)` — nothing was usable, so the picker is empty.
+- `ConfigHealth recomputed { state: 'invalid_config' }` — a key has a bad value (usually
+  `inferenceCredentialKind`); the log line above it names the field.
+
+Model discovery needs the gateway reachable at `inferenceGatewayBaseUrl` when the app launches.
 
 ## What gets translated
 
@@ -215,6 +293,7 @@ models. You can also skip the picker and run `claude --model <your-id>`.
 | `/admin` returns 404 from another machine | It's only served to local, private, and Tailscale addresses (`ADMIN_ALLOW_FROM`) |
 | `/admin` says the Host is not allowed | Browse by IP, MagicDNS name, or `*.ts.net`, or add the name to `ADMIN_HOSTS` |
 | Lost the admin password | Stop the gateway, set `"passwordHash": ""` under `admin` in `data/gateway.json`, and start it. A new setup code is printed |
+| Claude Desktop says *Your organization hasn't configured any models* | Its model ID contains a third-party vendor name — see [Claude Desktop](#claude-desktop) |
 | Background tasks are slow or expensive | Route Haiku to a small model |
 
 Use `LOG_LEVEL=debug` to see rejected requests and skipped upstream chunks. Every response carries a
