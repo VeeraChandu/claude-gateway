@@ -200,6 +200,7 @@ config you can switch between. A minimal one for this gateway, using a client ke
   "inferenceGatewayBaseUrl": "http://127.0.0.1:8080",
   "inferenceGatewayApiKey": "cgw_…",
   "inferenceGatewayAuthScheme": "bearer",
+  "inferenceCredentialKind": "static",
   "inferenceModels": [
     { "name": "claude-sonnet-5", "labelOverride": "Sonnet 5 via gateway" }
   ]
@@ -207,9 +208,12 @@ config you can switch between. A minimal one for this gateway, using a client ke
 ```
 
 Restart the app after editing. `inferenceGatewayAuthScheme` accepts `bearer` (the default, which sends
-`Authorization: Bearer <key>`) or `x-api-key`; this gateway accepts both. Leave
-`inferenceCredentialKind` out — it's only for the sign-in flows (`interactive`, `oauth`, …), and a
-value outside its enum makes the whole config invalid.
+`Authorization: Bearer <key>`) or `x-api-key`; this gateway accepts both.
+
+`inferenceCredentialKind` describes *how the app gets* the credential, and for a fixed API key the
+right value is `"static"` (the setup window calls it **Static API key**). The full enum is `static`,
+`helper-script`, `interactive`, `vendor-profile`, `workforce`, and `external-idp`; anything else makes
+the whole config invalid. `static` is what the setup window writes when you paste a key.
 
 Desktop reads the model list from `GET /v1/models` unless `inferenceModels` is set, in which case that
 list wins. Setting it explicitly is more predictable than relying on discovery.
@@ -250,8 +254,9 @@ tail -20 ~/Library/Logs/Claude-3p/main.log
   dropped the row: it's a vendor name (above).
 - `Gateway /v1/models non-OK` — the client key is wrong, or the app can't reach the URL.
 - `Model discovery: 0 found … picker = 0 (empty)` — nothing was usable, so the picker is empty.
-- `ConfigHealth recomputed { state: 'invalid_config' }` — a key has a bad value (usually
-  `inferenceCredentialKind`); the log line above it names the field.
+- `ConfigHealth recomputed { state: 'invalid_config' }` — a field has a bad value or a value outside
+  its enum (a misspelled scheme, an unknown `inferenceCredentialKind`, …). The log line above it
+  names the field. `inferenceCredentialKind: "static"` is valid and is not a cause.
 
 Model discovery needs the gateway reachable at `inferenceGatewayBaseUrl` when the app launches.
 
