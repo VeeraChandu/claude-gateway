@@ -1,12 +1,18 @@
 {
   "name": "claude-code-gateway",
-  "version": "1.0.0",
-  "description": "Ultra-low-latency, zero-dependency gateway to run Claude Code with OpenAI or OpenAI-compatible models",
+  "version": "2.0.0",
+  "description": "Low-latency, zero-dependency gateway that runs Claude Code against OpenAI or any OpenAI-compatible provider",
   "type": "module",
   "main": "server.js",
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
-    "start": "node --env-file=.env server.js",
-    "dev": "node --watch --env-file=.env server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test --test-timeout=20000",
+    "test:live": "node scripts/smoke-live.js",
+    "bench": "node bench/overhead.js"
   },
   "keywords": [
     "claude-code",
@@ -14,6 +20,6 @@
     "llm-gateway",
     "proxy"
   ],
-  "author": "",
+  "author": "Veera Chandu",
   "license": "MIT"
 }
