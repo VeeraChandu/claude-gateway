@@ -29,6 +29,7 @@ const MAX_ADMIN_BODY = 64 * 1024;
 const STATIC = {
   "/admin/": ["index.html", "text/html; charset=utf-8"],
   "/admin/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/admin/model-names.js": ["model-names.js", "text/javascript; charset=utf-8"],
   "/admin/app.css": ["app.css", "text/css; charset=utf-8"],
   "/admin/favicon.svg": ["favicon.svg", "image/svg+xml"]
 };
@@ -142,7 +143,15 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
   /** @type {Map<string, { count: number, resetAt: number }>} */
   const failures = new Map();
   const files = Object.fromEntries(
-    Object.entries(STATIC).map(([route, [file, type]]) => [route, { body: fs.readFileSync(path.join(PUBLIC_DIR, file)), type }])
+    Object.entries(STATIC).map(([route, [file, type]]) => [
+      route,
+      // model-names.js is shared with the server-side code, so it is read from src/
+      // rather than public/ and served at the same path the UI imports it from.
+      {
+        body: fs.readFileSync(file.startsWith("model-names.") ? path.join(HERE, "..", file) : path.join(PUBLIC_DIR, file)),
+        type
+      }
+    ])
   );
 
   /** @param {IncomingMessage} req */

@@ -170,6 +170,11 @@ input, select {
 }
 input:focus, select:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
 input.mono { font-family: var(--mono); font-size: 13px; }
+/* Model-ID feedback under the ID field in Routing → Your models. */
+.id-warn { margin-top: 4px; color: var(--warn); }
+.id-warn[hidden] { display: none; }
+.cell-id { display: grid; gap: 4px; }
+.cell-id button { justify-self: start; }
 .form { display: grid; gap: 14px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 details.advanced summary { cursor: pointer; color: var(--muted); font-weight: 550; font-size: 13px; padding: 2px 0; }

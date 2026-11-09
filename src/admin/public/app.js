@@ -2,6 +2,8 @@
 // createElement + text nodes (via h()), never from HTML strings, so server data
 // can't inject markup.
 
+import { checkModelId, suggestModelId, vendorToken } from "/admin/model-names.js";
+
 const app = document.getElementById("app");
 const toasts = document.getElementById("toasts");
 
@@ -660,21 +662,54 @@ function viewRouting() {
     const editor = routeEditor(m, { label: "Model" });
     const name = h("input", { value: m?.displayName ?? "", placeholder: "Qwen Coder", "aria-label": "Name in the picker", maxlength: "80" });
     const id = h("input", { class: "mono", value: m?.id ?? "", placeholder: "claude-qwen-coder", "aria-label": "Model ID", maxlength: "100" });
+    const warn = h("div", { class: "hint id-warn" });
+    const suggest = h("button", { class: "small ghost", type: "button", hidden: true }, "Use suggested ID");
     // Fill name and ID from the upstream model until the user edits them.
     let autoName = !m;
     let autoId = !m;
     name.addEventListener("input", () => (autoName = false));
     id.addEventListener("input", () => (autoId = false));
+
+    // Show, as you type, when Desktop would drop this ID.
+    const checkId = () => {
+      const value = id.value.trim();
+      const problem = value ? checkModelId(value) : "ok";
+      const upstream = editor.modelInput.value.trim();
+      const suggested = upstream ? suggestModelId(upstream) : "";
+      suggest.hidden = problem === "ok" || !suggested || suggested === value;
+      if (problem === "vendor-name") {
+        warn.textContent = `Claude Desktop drops IDs containing "${vendorToken(value)}" (Claude Code still shows it).`;
+      } else if (problem === "no-claude") {
+        warn.textContent = "Claude Code ignores IDs without “claude”, so it will not appear in /model.";
+      } else if (problem === "charset") {
+        warn.textContent = "IDs may only contain letters, digits and . _ : / -";
+      } else if (problem === "too-long") {
+        warn.textContent = "IDs are limited to 100 characters.";
+      } else {
+        warn.textContent = "";
+      }
+      warn.hidden = !warn.textContent;
+      return problem;
+    };
+    id.addEventListener("input", checkId);
+    suggest.addEventListener("click", () => {
+      id.value = suggestModelId(editor.modelInput.value.trim());
+      autoId = false;
+      checkId();
+      const upstream = editor.modelInput.value.trim();
+      if (autoName && upstream) name.value = upstream;
+    });
     editor.modelInput.addEventListener("input", () => {
       const upstream = editor.modelInput.value.trim();
       if (autoName) name.value = upstream;
-      if (autoId) id.value = upstream ? `claude-${slug(upstream)}` : "";
+      if (autoId) id.value = upstream ? suggestModelId(upstream) || `claude-${slug(upstream)}` : "";
+      checkId();
     });
     const row = h(
       "tr",
       {},
       h("td", {}, name),
-      h("td", {}, id),
+      h("td", {}, h("div", { class: "cell-id" }, id, suggest), warn),
       h("td", {}, editor.select),
       h("td", {}, editor.modelCell),
       h(
@@ -699,6 +734,8 @@ function viewRouting() {
     customModels.push(entry);
     modelsBody.append(row);
     syncModelsEmpty();
+    // Existing rows get checked too, so a saved ID Desktop rejects is visible.
+    checkId();
     if (!m) editor.select.focus();
   };
   d.routes.models.forEach(addModel);

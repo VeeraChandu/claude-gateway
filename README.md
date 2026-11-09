@@ -239,6 +239,15 @@ The same check validates IDs in `inferenceModels` and again when a session names
 Only the model *ID* matters: the upstream model behind it is sent to your provider as-is. A route
 named `claude-venice-flash` pointed at `deepseek-v4-1-flash` works in both clients.
 
+**The admin UI suggests a safe ID for you.** Under **Routing → Your models**, type the upstream model
+name and the ID is filled in with a vendor-free one; the shape is `claude-<vendor code>-<model>`, so
+`deepseek-v4-1-flash` becomes `claude-d-v4-1-flash` and `openai-gpt-6-luna` becomes `claude-o-6-luna`.
+The ID field warns as you type when Desktop would drop the value, names the offending token, and
+offers **Use suggested ID** to fix it — including on rows you saved earlier. Suggestions repair a
+name token rather than dropping it (`kimi-k2.5` → `claude-k-k2-5`, `phi-4` → `claude-p-4`), since a
+`.` or `-` inside a version is what usually trips the filter. The vendor list is embedded in the
+app, so a suggestion is a best effort: check it against the table above if Desktop ever updates.
+
 So when you add rows under **Routing → Your models**, give Desktop-facing entries IDs that name no
 vendor. Claude Code's own gate is only "the ID contains `claude`", which is why a name like
 `claude-deepseek-v4-1-flash` can work in Claude Code and still show *Your organization hasn't
@@ -320,6 +329,7 @@ server.js              entry point: config, logging, signals
 src/config.js          env loading and validation
 src/store.js           persistent connections, routes, client keys, admin password
 src/models.js          model routing across connections, reasoning-model detection
+src/model-names.js     Claude Desktop's vendor-name filter and safe model-ID suggestions
 src/server.js          HTTP routing, client auth, body limits, streaming pipeline
 src/admin/             admin API (sessions, CSRF/Host/IP checks) and the UI in public/
 src/net.js             address and Host header checks
