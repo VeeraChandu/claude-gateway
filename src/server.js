@@ -284,6 +284,11 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
       if (pathname === "/health") {
         return sendJson(res, 200, { status: "ok" });
       }
+      if (pathname === "/api/hello") {
+        // Claude Code probes this (HEAD) at startup.
+        res.writeHead(200);
+        return res.end();
+      }
       if (pathname === "/") {
         res.writeHead(302, { Location: "/admin/" });
         return res.end();
@@ -294,11 +299,20 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
       if (pathname === "/v1/models" || pathname === "/models") {
         if (req.method !== "GET") throw new GatewayError(405, "invalid_request_error", "Use GET");
         authorize(req);
-        const models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"].map((id) => {
-          const r = resolveRoute(id, store.state);
-          return { type: "model", id, display_name: r ? `${id} → ${r.provider.name}/${r.model}` : id, created_at: "2026-01-01T00:00:00Z" };
+        // Your models, for Claude Code's /model picker (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1).
+        // Built-in aliases (opus, sonnet, haiku, fable) are already in the picker.
+        const { state } = store;
+        const models = state.routes.models.map((m) => {
+          const provider = state.providers.find((p) => p.id === m.provider);
+          return {
+            type: "model",
+            id: m.id,
+            display_name: m.displayName || m.id,
+            description: m.description || `${provider?.name ?? "?"} · ${m.model}`,
+            created_at: "2026-01-01T00:00:00Z"
+          };
         });
-        return sendJson(res, 200, { data: models, has_more: false, first_id: models[0].id, last_id: models.at(-1)?.id });
+        return sendJson(res, 200, { data: models, has_more: false, first_id: models[0]?.id ?? null, last_id: models.at(-1)?.id ?? null });
       }
       if (COUNT_TOKENS_PATHS.has(pathname)) {
         if (req.method !== "POST") throw new GatewayError(405, "invalid_request_error", "Use POST");

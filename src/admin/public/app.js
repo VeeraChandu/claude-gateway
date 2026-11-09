@@ -26,8 +26,16 @@ const PRESETS = [
 const FAMILIES = [
   ["opus", "Opus"],
   ["sonnet", "Sonnet"],
-  ["haiku", "Haiku"]
+  ["haiku", "Haiku"],
+  ["fable", "Fable"]
 ];
+
+const slug = (text) =>
+  text
+    .toLowerCase()
+    .replace(/^.*\//, "")
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 
 /** UI state */
 const S = {
@@ -404,6 +412,7 @@ function routesUsing(id) {
   const uses = [];
   if (r.default?.provider === id) uses.push("default");
   for (const [f] of FAMILIES) if (r[f]?.provider === id) uses.push(f);
+  for (const m of r.models) if (m.provider === id) uses.push(m.displayName || m.id);
   for (const o of r.overrides) if (o.provider === id) uses.push(o.match);
   return uses;
 }
@@ -627,6 +636,7 @@ function routeEditor(route, { allowInherit = false, label = "" } = {}) {
   refreshModels();
   return {
     select,
+    modelInput: model,
     modelCell: h("div", {}, model, datalist, hint),
     value: () => (select.value ? { provider: select.value, model: model.value.trim() } : null)
   };
@@ -640,6 +650,59 @@ function viewRouting() {
 
   const def = routeEditor(d.routes.default, { label: "Default" });
   const families = FAMILIES.map(([id, label]) => ({ id, label, editor: routeEditor(d.routes[id], { allowInherit: true, label }) }));
+  // ── Your models (listed in Claude Code's /model picker) ──
+  const modelsEmpty = h("tr", {}, h("td", { colspan: "5", class: "muted" }, "None yet. Add one for each model you want to pick in Claude Code."));
+  const modelsBody = h("tbody", {}, modelsEmpty);
+  const customModels = [];
+  const syncModelsEmpty = () => (modelsEmpty.hidden = customModels.length > 0);
+
+  const addModel = (m) => {
+    const editor = routeEditor(m, { label: "Model" });
+    const name = h("input", { value: m?.displayName ?? "", placeholder: "Qwen Coder", "aria-label": "Name in the picker", maxlength: "80" });
+    const id = h("input", { class: "mono", value: m?.id ?? "", placeholder: "claude-qwen-coder", "aria-label": "Model ID", maxlength: "100" });
+    // Fill name and ID from the upstream model until the user edits them.
+    let autoName = !m;
+    let autoId = !m;
+    name.addEventListener("input", () => (autoName = false));
+    id.addEventListener("input", () => (autoId = false));
+    editor.modelInput.addEventListener("input", () => {
+      const upstream = editor.modelInput.value.trim();
+      if (autoName) name.value = upstream;
+      if (autoId) id.value = upstream ? `claude-${slug(upstream)}` : "";
+    });
+    const row = h(
+      "tr",
+      {},
+      h("td", {}, name),
+      h("td", {}, id),
+      h("td", {}, editor.select),
+      h("td", {}, editor.modelCell),
+      h(
+        "td",
+        {},
+        h(
+          "button",
+          {
+            class: "small ghost",
+            "aria-label": "Remove model",
+            onclick: () => {
+              customModels.splice(customModels.indexOf(entry), 1);
+              row.remove();
+              syncModelsEmpty();
+            }
+          },
+          "Remove"
+        )
+      )
+    );
+    const entry = { name, id, editor };
+    customModels.push(entry);
+    modelsBody.append(row);
+    syncModelsEmpty();
+    if (!m) editor.select.focus();
+  };
+  d.routes.models.forEach(addModel);
+
   const emptyRow = h("tr", {}, h("td", { colspan: "4", class: "muted" }, "No overrides. Family routes handle everything."));
   const overridesBody = h("tbody", {}, emptyRow);
   const overrides = [];
@@ -688,6 +751,7 @@ function viewRouting() {
         const body = {
           default: def.value(),
           ...Object.fromEntries(families.map((f) => [f.id, f.editor.value()])),
+          models: customModels.map((m) => ({ ...m.editor.value(), id: m.id.value.trim(), displayName: m.name.value.trim() })),
           overrides: overrides.map((o) => ({ match: o.match.value.trim(), ...o.editor.value() }))
         };
         await act(save, () => api("PUT", "/routes", body));
@@ -725,7 +789,7 @@ function viewRouting() {
     h(
       "div",
       { class: "card" },
-      h("div", { class: "card-head" }, h("h2", {}, "Model families"), h("span", { class: "muted small hide-sm" }, "Matches any version, e.g. claude-haiku-4-5 or claude-3-5-haiku")),
+      h("div", { class: "card-head" }, h("h2", {}, "Model families"), h("span", { class: "muted small hide-sm" }, "Claude Code's built-in choices, any version")),
       h(
         "div",
         { class: "table-wrap" },
@@ -745,8 +809,30 @@ function viewRouting() {
     h(
       "div",
       { class: "card" },
+      h("div", { class: "card-head" }, h("h2", {}, "Your models"), h("button", { class: "small", onclick: () => addModel() }, "Add model")),
+      h(
+        "div",
+        { class: "card-body muted small" },
+        "Extra entries for Claude Code's /model picker, as many as you like. Claude Code loads this list at startup when ",
+        h("code", {}, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1"),
+        " is set (included in the snippet when you create a client key). IDs must contain \"claude\"; restart Claude Code after changes."
+      ),
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "route-table models" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Name in picker"), h("th", {}, "Model ID"), h("th", {}, "Connection"), h("th", {}, "Upstream model"), h("th", {}))),
+          modelsBody
+        )
+      )
+    ),
+    h(
+      "div",
+      { class: "card" },
       h("div", { class: "card-head" }, h("h2", {}, "Overrides"), h("button", { class: "small", onclick: () => addOverride() }, "Add override")),
-      h("div", { class: "card-body muted small" }, "Checked first. Matches the exact model name, or any name starting with it (longest match wins). Non-Claude names like gpt-4.1 are passed to the default connection unchanged."),
+      h("div", { class: "card-body muted small" }, "Checked after your models. Matches the exact model name, or any name starting with it (longest match wins). Non-Claude names like gpt-4.1 are passed to the default connection unchanged."),
       h("div", { class: "table-wrap" }, h("table", { class: "route-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Model name or prefix"), h("th", {}, "Connection"), h("th", {}, "Upstream model"), h("th", {}))), overridesBody))
     ),
     h(
@@ -763,7 +849,7 @@ function viewRouting() {
 // ── Client keys ────────────────────────────────────────────────────────────
 
 function connectSnippet(secret) {
-  return `export ANTHROPIC_BASE_URL=${location.origin}\nexport ANTHROPIC_API_KEY=${secret}\nclaude`;
+  return `export ANTHROPIC_BASE_URL=${location.origin}\nexport ANTHROPIC_API_KEY=${secret}\nexport CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\nclaude`;
 }
 
 function createKeyDialog() {

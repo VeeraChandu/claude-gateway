@@ -19,7 +19,10 @@ import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "no
  *
  * @typedef {{ provider: string, model: string }} Route
  * @typedef {{ match: string, provider: string, model: string }} RouteOverride
- * @typedef {{ default: Route | null, opus: Route | null, sonnet: Route | null, haiku: Route | null, overrides: RouteOverride[] }} Routes
+ * @typedef {{ id: string, displayName: string, description: string, provider: string, model: string }} CustomModel
+ *   A model of your own, listed on /v1/models so it appears in Claude Code's /model picker.
+ * @typedef {{ default: Route | null, opus: Route | null, sonnet: Route | null, haiku: Route | null, fable: Route | null,
+ *   models: CustomModel[], overrides: RouteOverride[] }} Routes
  *
  * @typedef {object} ClientKey
  * @property {string} id
@@ -48,7 +51,13 @@ export class StoreError extends Error {
   }
 }
 
-const FAMILIES = /** @type {const} */ (["opus", "sonnet", "haiku"]);
+export const FAMILIES = /** @type {const} */ (["opus", "sonnet", "haiku", "fable"]);
+
+/**
+ * Claude Code only adds discovered models whose id contains "claude" or
+ * "anthropic" to its /model picker, and sends the id verbatim as `model`.
+ */
+const CUSTOM_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 const USAGE_FLUSH_MS = 5000;
 
 const newId = (/** @type {string} */ prefix) => `${prefix}_${randomBytes(6).toString("hex")}`;
@@ -60,7 +69,7 @@ export function emptyState() {
   return {
     version: 1,
     providers: [],
-    routes: { default: null, opus: null, sonnet: null, haiku: null, overrides: [] },
+    routes: { default: null, opus: null, sonnet: null, haiku: null, fable: null, models: [], overrides: [] },
     clientKeys: [],
     admin: { passwordHash: "" },
     security: { requireClientKey: false }
@@ -142,6 +151,32 @@ function requireText(v, what, max = 80) {
 }
 
 /**
+ * @param {unknown} input
+ * @returns {CustomModel[]}
+ */
+function normalizeModels(input) {
+  const seen = new Set();
+  return (Array.isArray(input) ? input : []).map((/** @type {any} */ m) => {
+    const id = requireText(m?.id, "Model ID", 100);
+    if (!CUSTOM_MODEL_ID.test(id)) {
+      throw new StoreError(400, `Model ID "${id}" may only contain letters, digits and . _ : / -`);
+    }
+    if (!/claude|anthropic/i.test(id)) {
+      throw new StoreError(400, `Model ID "${id}" must contain "claude" so Claude Code shows it in /model (e.g. claude-${id})`);
+    }
+    if (seen.has(id.toLowerCase())) throw new StoreError(400, `Model ID "${id}" is listed twice`);
+    seen.add(id.toLowerCase());
+    return {
+      id,
+      displayName: String(m.displayName ?? "").trim().slice(0, 80),
+      description: String(m.description ?? "").trim().slice(0, 200),
+      provider: requireText(m.provider, `Connection for ${id}`),
+      model: requireText(m.model, `Upstream model for ${id}`, 200)
+    };
+  });
+}
+
+/**
  * Persistent gateway state: upstream providers, model routes, client keys and
  * the admin password. Stored as one JSON file (mode 0600), written atomically.
  * Emits "change" after every successful update.
@@ -180,7 +215,12 @@ export class Store extends EventEmitter {
         const raw = await fs.readFile(file, "utf8");
         const parsed = JSON.parse(raw);
         const base = emptyState();
-        state = { ...base, ...parsed, security: { ...base.security, ...parsed.security } };
+        state = {
+          ...base,
+          ...parsed,
+          routes: { ...base.routes, ...parsed.routes },
+          security: { ...base.security, ...parsed.security }
+        };
         const { mode } = await fs.stat(file);
         if (mode & 0o077) {
           await fs.chmod(file, 0o600);
@@ -277,7 +317,7 @@ export class Store extends EventEmitter {
       if (names.has(key)) throw new StoreError(409, `A connection named "${p.name}" already exists`);
       names.add(key);
     }
-    const routes = [s.routes.default, ...FAMILIES.map((f) => s.routes[f]), ...s.routes.overrides];
+    const routes = [s.routes.default, ...FAMILIES.map((f) => s.routes[f]), ...s.routes.models, ...s.routes.overrides];
     for (const r of routes) {
       if (r && !ids.has(r.provider)) throw new StoreError(400, "A route points at a connection that does not exist");
     }
@@ -353,7 +393,7 @@ export class Store extends EventEmitter {
     return this.#update((s) => {
       if (!s.providers.some((p) => p.id === id)) throw new StoreError(404, "Connection not found");
       const r = s.routes;
-      if ([r.default, ...FAMILIES.map((f) => r[f]), ...r.overrides].some((x) => x?.provider === id)) {
+      if ([r.default, ...FAMILIES.map((f) => r[f]), ...r.models, ...r.overrides].some((x) => x?.provider === id)) {
         throw new StoreError(409, "This connection is used by a route. Change the routes first.");
       }
       s.providers = s.providers.filter((p) => p.id !== id);
@@ -375,6 +415,8 @@ export class Store extends EventEmitter {
       s.routes = {
         default: def,
         opus: route(input.opus, "Opus"),
+        fable: route(input.fable, "Fable"),
+        models: normalizeModels(input.models),
         sonnet: route(input.sonnet, "Sonnet"),
         haiku: route(input.haiku, "Haiku"),
         overrides: (Array.isArray(input.overrides) ? input.overrides : []).map((/** @type {any} */ o) => ({

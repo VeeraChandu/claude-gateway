@@ -196,3 +196,46 @@ test("network checks: local/Tailscale addresses and rebinding-safe hosts", () =>
   }
   assert.ok(isAllowedAdminHost("gateway.home.lan:8080", ["gateway.home.lan"]));
 });
+
+test("custom picker models: validation and routing (checked before overrides and families)", async () => {
+  const store = await memStore();
+  const big = await store.addProvider({ name: "Big", baseUrl: "https://big/v1", apiKey: "k", defaultModel: "big-default" });
+  const local = await store.addProvider({ name: "Local", baseUrl: "http://localhost:11434/v1", apiKey: "ollama" });
+  const base = { default: { provider: big.id, model: "big-default" } };
+
+  await assert.rejects(store.setRoutes({ ...base, models: [{ id: "qwen-coder", provider: local.id, model: "q" }] }), /must contain "claude"/);
+  await assert.rejects(store.setRoutes({ ...base, models: [{ id: "claude qwen", provider: local.id, model: "q" }] }), /may only contain/);
+  await assert.rejects(
+    store.setRoutes({ ...base, models: [{ id: "claude-a", provider: local.id, model: "q" }, { id: "CLAUDE-A", provider: local.id, model: "q" }] }),
+    /listed twice/
+  );
+  await assert.rejects(store.setRoutes({ ...base, models: [{ id: "claude-a", provider: "prv_x", model: "q" }] }), /does not exist/);
+
+  const models = Array.from({ length: 7 }, (_, i) => ({ id: `claude-gw-${i}`, displayName: `Model ${i}`, provider: i % 2 ? local.id : big.id, model: `up-${i}` }));
+  await store.setRoutes({
+    ...base,
+    fable: { provider: local.id, model: "fable-up" },
+    models: [...models, { id: "anthropic/qwen:32b", provider: local.id, model: "qwen2.5-coder:32b" }],
+    overrides: [{ match: "claude-gw", provider: big.id, model: "should-not-win" }]
+  });
+  assert.equal(store.state.routes.models.length, 8);
+  for (const [i, m] of models.entries()) {
+    const r = resolveRoute(m.id, store.state);
+    assert.deepEqual([r.provider.name, r.model], [i % 2 ? "Local" : "Big", `up-${i}`]);
+  }
+  assert.equal(resolveRoute("anthropic/qwen:32b", store.state).model, "qwen2.5-coder:32b");
+  assert.equal(resolveRoute("claude-fable-5-2", store.state).rule, "fable");
+  assert.equal(resolveRoute("claude-gw-other", store.state).model, "should-not-win");
+
+  await assert.rejects(store.deleteProvider(local.id), /used by a route/);
+});
+
+test("old store files without fable/models load with empty defaults", async () => {
+  const { dir, file } = await tmpFile();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ version: 1, providers: [], routes: { default: null, opus: null, sonnet: null, haiku: null, overrides: [] }, clientKeys: [], admin: { passwordHash: "" } }), { mode: 0o600 });
+  const store = await Store.open({ file, logger: silentLogger });
+  assert.deepEqual(store.state.routes.models, []);
+  assert.equal(store.state.routes.fable, null);
+  await fs.rm(dir, { recursive: true });
+});

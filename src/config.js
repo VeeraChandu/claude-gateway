@@ -17,7 +17,7 @@ export const DEFAULT_REASONING_PATTERN = /(^|\/)(o\d+(-|$)|gpt-5)|reasoner/i;
  * @property {string} baseUrl
  * @property {string} apiKey
  * @property {string} defaultModel
- * @property {{ opus?: string, sonnet?: string, haiku?: string }} familyModels  Only explicitly set ones
+ * @property {{ opus?: string, sonnet?: string, haiku?: string, fable?: string }} familyModels  Only explicitly set ones
  * @property {Record<string, string>} modelMap
  * @property {string} reasoningPattern  Source of REASONING_MODELS, or ""
  * @property {number | null} maxOutputTokens
@@ -134,7 +134,7 @@ export function loadConfig(env, meta = {}) {
     apiKey: get("OPENAI_API_KEY"),
     defaultModel,
     familyModels: Object.fromEntries(
-      [["opus", "MODEL_OPUS"], ["sonnet", "MODEL_SONNET"], ["haiku", "MODEL_HAIKU"]]
+      [["opus", "MODEL_OPUS"], ["sonnet", "MODEL_SONNET"], ["haiku", "MODEL_HAIKU"], ["fable", "MODEL_FABLE"]]
         .filter(([, key]) => get(key))
         .map(([family, key]) => [family, get(key)])
     ),

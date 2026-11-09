@@ -191,6 +191,7 @@ tr.error td { color: var(--danger); }
 tr.revoked td { color: var(--muted); }
 .route-table td { padding: 8px 14px; }
 .route-table td:first-child { width: 150px; font-weight: 550; }
+.route-table.models td:first-child { width: auto; min-width: 140px; font-weight: 400; }
 .route-table select { min-width: 160px; }
 
 /* ── Code / secret ── */

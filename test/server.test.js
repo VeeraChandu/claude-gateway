@@ -299,3 +299,34 @@ test("unknown path → 404, wrong method → 405", async (t) => {
   assert.equal((await fetch(s.base + "/nope")).status, 404);
   assert.equal((await fetch(s.base + "/v1/messages")).status, 405);
 });
+
+test("/v1/models lists your models for Claude Code's picker; /api/hello probe answers", async (t) => {
+  const s = await startStack(streamOk, {}, { clientKey: true });
+  t.after(() => s.close());
+  const auth = { "x-api-key": s.key };
+
+  let list = await (await fetch(`${s.base}/v1/models?limit=1000`, { headers: auth })).json();
+  assert.deepEqual(list.data, []);
+
+  await s.store.setRoutes({
+    default: { provider: s.provider.id, model: "upstream-model" },
+    models: [
+      { id: "claude-gw-qwen", displayName: "Qwen Coder", provider: s.provider.id, model: "qwen2.5-coder:32b" },
+      { id: "claude-gw-r1", provider: s.provider.id, model: "deepseek-r1" }
+    ]
+  });
+  list = await (await fetch(`${s.base}/v1/models?limit=1000`, { headers: auth })).json();
+  assert.deepEqual(
+    list.data.map((m) => [m.id, m.display_name, m.description]),
+    [
+      ["claude-gw-qwen", "Qwen Coder", "Fake · qwen2.5-coder:32b"],
+      ["claude-gw-r1", "claude-gw-r1", "Fake · deepseek-r1"]
+    ]
+  );
+  assert.ok(list.data.every((m) => /claude|anthropic/i.test(m.id)), "Claude Code drops ids without claude/anthropic");
+
+  await (await post(s.base, "/v1/messages", { ...hi, model: "claude-gw-qwen" }, auth)).text();
+  assert.equal(s.requests.at(-1).body.model, "qwen2.5-coder:32b");
+
+  assert.equal((await fetch(`${s.base}/api/hello`, { method: "HEAD" })).status, 200);
+});

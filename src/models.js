@@ -7,10 +7,11 @@ import { DEFAULT_REASONING_PATTERN } from "./config.js";
 /**
  * Pick the connection and upstream model for a requested model name.
  *
+ * 0. Your models (listed in Claude Code's /model picker): exact id match.
  * 1. Overrides: exact match, then longest matching prefix.
  * 2. Non-Claude names (e.g. `claude --model gpt-4.1`) go to the default
  *    connection with the name unchanged.
- * 3. Claude names route by family (opus / sonnet / haiku), so new versions
+ * 3. Claude names route by family (opus / sonnet / haiku / fable), so new versions
  *    like `claude-sonnet-4-5` map without config changes; unset families
  *    fall back to the default route.
  * 4. Anything else uses the default route.
@@ -28,6 +29,8 @@ export function resolveRoute(requested, state) {
   };
 
   const name = requested || "";
+  const custom = routes.models.find((m) => m.id === name);
+  if (custom) return pick(custom, `model "${custom.id}"`);
   const exact = routes.overrides.find((o) => o.match === name);
   if (exact) return pick(exact, `override "${exact.match}"`);
   const prefix = routes.overrides
@@ -41,9 +44,9 @@ export function resolveRoute(requested, state) {
   }
 
   const lower = name.toLowerCase();
-  const family = ["haiku", "sonnet", "opus"].find((f) => lower.includes(f));
+  const family = /** @type {const} */ (["haiku", "sonnet", "opus", "fable"]).find((f) => lower.includes(f));
   if (family) {
-    const r = pick(routes[/** @type {"haiku" | "sonnet" | "opus"} */ (family)], family);
+    const r = pick(routes[family], family);
     if (r) return r;
   }
   return pick(routes.default, "default");

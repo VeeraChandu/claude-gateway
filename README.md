@@ -49,7 +49,7 @@ Served at `/admin` by the gateway itself (plain HTML/JS, no build step):
 | :-- | :-- |
 | **Overview** | Requests, errors, and token totals; a live table of recent requests showing which key, model, connection, and upstream model each used, plus status, stop reason, tokens, and time to first token |
 | **Connections** | Add, edit, test, and delete providers. Each has its own API key, output-token cap, and reasoning-model pattern. Keys are write-only: the UI only ever shows `sk-…a9f2` |
-| **Routing** | Connection + model per Claude family, prefix overrides, and a "test a model name" resolver. Changes apply to the next request, with no restart |
+| **Routing** | Connection + model per Claude family (Opus, Sonnet, Haiku, Fable); **your models**, any number of extra entries for Claude Code's `/model` picker; prefix overrides; and a "test a model name" resolver. Changes apply to the next request, with no restart |
 | **Client keys** | Create, revoke, and delete keys. Shows last use, request count, and token totals per key |
 | **Settings** | Change the admin password (signs out other sessions); server info |
 
@@ -144,16 +144,35 @@ Server settings are environment variables, usually in `.env`. Your shell's value
 variables:
 - `OPENAI_BASE_URL` and `OPENAI_API_KEY` become the first connection, with `MAX_OUTPUT_TOKENS` and
   `REASONING_MODELS` as its settings.
-- `DEFAULT_MODEL`, `MODEL_OPUS`, `MODEL_SONNET`, `MODEL_HAIKU`, and `MODEL_MAP` become its routes.
+- `DEFAULT_MODEL`, `MODEL_OPUS`, `MODEL_SONNET`, `MODEL_HAIKU`, `MODEL_FABLE`, and `MODEL_MAP` become its routes.
 - `GATEWAY_API_KEY` becomes a client key.
 
 After that, the store is the source of truth and these variables are ignored.
 
+### More models in Claude Code's `/model` picker
+
+Claude Code's picker has built-in entries: Opus, Sonnet, Haiku, Fable, the `[1m]` variants, and
+`opusplan`. Each family routes to whatever you set on the Routing page. The `[1m]` variants reach the
+gateway as the plain model name, so they share their family's route.
+
+To add your own entries, use **Routing → Your models**. Add one row per model you want to pick: a
+display name, an ID containing `claude` (Claude Code ignores IDs without it), a connection, and an
+upstream model. The gateway lists them on `GET /v1/models`. Claude Code loads that list at startup
+when this is set:
+
+```bash
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+```
+
+The snippet shown when you create a client key includes it. Restart Claude Code after changing your
+models. You can also skip the picker and run `claude --model <your-id>`.
+
 ### Model routing
 
+0. **Your models:** an exact ID match.
 1. **Overrides:** an exact match, then the longest matching prefix.
 2. **Non-Claude names** (`claude --model gpt-4.1`) go to the default connection unchanged.
-3. **Claude names route by family:** anything containing `opus`, `sonnet`, or `haiku` uses that
+3. **Claude names route by family:** anything containing `opus`, `sonnet`, `haiku`, or `fable` uses that
    family's route, so new releases need no changes. Families without a route use the default.
    Point Haiku at a cheap model: Claude Code makes many small background calls with it.
 4. **Anything else** uses the default route.
