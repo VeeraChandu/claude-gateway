@@ -12,7 +12,8 @@ env_value() {
 
 HOST="${HOST:-$(env_value HOST)}"; HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-$(env_value PORT)}"; PORT="${PORT:-8080}"
-GATEWAY_API_KEY="${GATEWAY_API_KEY:-$(env_value GATEWAY_API_KEY)}"
+# A client key from the admin UI; GATEWAY_API_KEY from .env also works (it seeds the first key).
+GATEWAY_API_KEY="${CLAUDE_GATEWAY_KEY:-${GATEWAY_API_KEY:-$(env_value GATEWAY_API_KEY)}}"
 [[ "$HOST" == "0.0.0.0" ]] && CONNECT_HOST=127.0.0.1 || CONNECT_HOST="$HOST"
 URL="http://${CONNECT_HOST}:${PORT}"
 
