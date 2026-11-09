@@ -2,10 +2,19 @@ import http from "node:http";
 import { once } from "node:events";
 import { loadConfig } from "../src/config.js";
 import { createGateway } from "../src/server.js";
+import { Store } from "../src/store.js";
+import { silentLogger } from "../src/logger.js";
 
 /** Build a config for tests; overrides are env-style strings. */
 export function testConfig(env = {}) {
-  return loadConfig({ OPENAI_API_KEY: "upstream-key", UPSTREAM_MAX_RETRIES: "0", ...env });
+  return loadConfig({ DATA_DIR: "none", UPSTREAM_MAX_RETRIES: "0", ...env });
+}
+
+/** An in-memory store with one connection as the default route. */
+export async function testStore({ baseUrl = "http://127.0.0.1:9/v1", model = "upstream-model", provider = {} } = {}) {
+  const store = await Store.open({ file: "", logger: silentLogger });
+  const p = await store.addProvider({ name: "Fake", baseUrl, apiKey: "upstream-key", defaultModel: model, ...provider });
+  return { store, provider: p };
 }
 
 /** An OpenAI-style SSE body from chunk objects. */
@@ -15,38 +24,58 @@ export function sse(chunks, { done = true } = {}) {
 
 export const textChunk = (content) => ({ choices: [{ index: 0, delta: { content } }] });
 
-/**
- * Start a fake upstream and a gateway pointed at it.
- * `handler(req, res, body)` handles each upstream request; requests are recorded.
- */
-export async function startStack(handler, env = {}) {
+/** Start a fake OpenAI-compatible upstream; requests are recorded. */
+export async function fakeUpstream(handler) {
   const requests = [];
-  const upstream = http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const raw = Buffer.concat(chunks).toString("utf8");
-    const record = { headers: req.headers, url: req.url, body: raw ? JSON.parse(raw) : null, closed: false };
+    const record = { method: req.method, headers: req.headers, url: req.url, body: raw ? JSON.parse(raw) : null, closed: false };
     res.on("close", () => (record.closed = !res.writableFinished));
     requests.push(record);
     await handler(req, res, record.body, requests.length);
   });
-  upstream.listen(0, "127.0.0.1");
-  await once(upstream, "listening");
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return {
+    server,
+    requests,
+    url: `http://127.0.0.1:${server.address().port}/v1`,
+    close() {
+      server.closeAllConnections();
+      return new Promise((r) => server.close(r));
+    }
+  };
+}
 
-  const config = testConfig({ OPENAI_BASE_URL: `http://127.0.0.1:${upstream.address().port}/v1`, ...env });
-  const gateway = createGateway(config);
+/**
+ * Start a fake upstream and a gateway pointed at it.
+ * `handler(req, res, body, n)` handles each upstream request.
+ * opts.clientKey: create a client key and return it as `key`.
+ */
+export async function startStack(handler, env = {}, opts = {}) {
+  const upstream = await fakeUpstream(handler);
+  const { store, provider } = await testStore({ baseUrl: upstream.url, ...opts.store });
+  const key = opts.clientKey ? (await store.createClientKey("test")).secret : "";
+
+  const config = testConfig(env);
+  const gateway = createGateway(config, { store, setupCode: opts.setupCode ?? "" });
   gateway.listen(0, "127.0.0.1");
   await once(gateway, "listening");
   const base = `http://127.0.0.1:${gateway.address().port}`;
 
   return {
     base,
-    requests,
+    requests: upstream.requests,
+    upstream,
+    store,
+    provider,
     config,
+    key,
     async close() {
       gateway.closeAllConnections();
-      upstream.closeAllConnections();
-      await Promise.all([new Promise((r) => gateway.close(r)), new Promise((r) => upstream.close(r))]);
+      await Promise.all([new Promise((r) => gateway.close(r)), upstream.close()]);
     }
   };
 }

@@ -7,5 +7,11 @@
     "strict": false,
     "noEmit": true
   },
-  "include": ["server.js", "src/**/*.js"]
+  "include": [
+    "server.js",
+    "src/**/*.js"
+  ],
+  "exclude": [
+    "src/admin/public"
+  ]
 }

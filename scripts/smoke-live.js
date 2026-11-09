@@ -1,16 +1,22 @@
-// Live check against your real provider using your .env (costs a few tokens).
-// Verifies streaming text and a tool-call round trip. Run: npm run test:live
+// Live check against your real connections (costs a few tokens). Uses an
+// in-memory copy of the gateway store, so it never writes to it or needs a
+// client key. Verifies streaming text and a tool-call round trip. Run: npm run test:live
 import { once } from "node:events";
 import { loadConfigFromEnvironment } from "../src/config.js";
 import { createGateway } from "../src/server.js";
 import { createLogger } from "../src/logger.js";
+import { Store } from "../src/store.js";
+import { resolveRoute } from "../src/models.js";
 
-const config = loadConfigFromEnvironment();
-const gateway = createGateway(config, { logger: createLogger({ format: "pretty", level: "warn" }) });
+const config = { ...loadConfigFromEnvironment(), host: "127.0.0.1" };
+const logger = createLogger({ format: "pretty", level: "warn" });
+const real = await Store.open({ file: config.dataFile, seed: config.seed, logger });
+const store = new Store({ ...structuredClone(real.state), clientKeys: [], security: { requireClientKey: false } }, "", logger);
+const gateway = createGateway(config, { store, logger });
 gateway.listen(0, "127.0.0.1");
 await once(gateway, "listening");
 const base = `http://127.0.0.1:${gateway.address().port}`;
-const headers = { "content-type": "application/json", "x-api-key": config.gatewayApiKey || "local" };
+const headers = { "content-type": "application/json" };
 
 async function stream(body) {
   const res = await fetch(`${base}/v1/messages`, { method: "POST", headers, body: JSON.stringify({ ...body, stream: true }) });
@@ -34,7 +40,11 @@ async function check(name, fn) {
   }
 }
 
-console.log(`Upstream: ${config.upstreamBaseUrl}  sonnet → ${config.familyModels.sonnet}  haiku → ${config.familyModels.haiku}\n`);
+for (const m of ["claude-sonnet-4-5", "claude-haiku-4-5"]) {
+  const r = resolveRoute(m, store.state);
+  console.log(`${m} → ${r ? `${r.provider.name} (${r.provider.baseUrl}) / ${r.model}` : "no route"}`);
+}
+console.log();
 
 await check("streaming text", async () => {
   const events = await stream({

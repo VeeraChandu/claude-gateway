@@ -1,7 +1,9 @@
 // @ts-check
+import { randomInt } from "node:crypto";
 import { loadConfigFromEnvironment, ConfigError, isLoopback } from "./src/config.js";
 import { createLogger } from "./src/logger.js";
 import { createGateway } from "./src/server.js";
+import { Store } from "./src/store.js";
 
 let config;
 try {
@@ -14,7 +16,22 @@ try {
 const logger = createLogger({ format: config.logFormat, level: config.logLevel });
 for (const w of config.warnings) logger.warn(w);
 
-const server = createGateway(config, { logger });
+let store;
+try {
+  store = await Store.open({ file: config.dataFile, seed: config.seed, logger });
+} catch (err) {
+  logger.error("cannot open store", { error: /** @type {Error} */ (err).message });
+  process.exit(1);
+}
+
+// One-time code required to set the admin password, so only someone who can
+// read this log can claim a fresh gateway.
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const setupCode = store.hasAdminPassword()
+  ? ""
+  : Array.from({ length: 8 }, (_, i) => (i === 4 ? "-" : "") + ALPHABET[randomInt(ALPHABET.length)]).join("");
+
+const server = createGateway(config, { store, logger, setupCode });
 
 server.on("error", (err) => {
   logger.error("server error", { error: err.message });
@@ -24,32 +41,39 @@ server.on("error", (err) => {
 server.listen(config.port, config.host, () => {
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : config.port;
-  const url = `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}`;
+  const host = config.host === "0.0.0.0" || config.host === "::" ? "localhost" : config.host;
+  const url = `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
   logger.info("gateway listening", {
     url,
-    upstream: config.upstreamBaseUrl,
-    models: { default: config.defaultModel, ...config.familyModels, ...config.modelMap },
-    auth: config.passthroughClientKey ? "passthrough" : config.gatewayApiKey ? "gateway-key" : "none",
+    admin: config.adminEnabled ? `${url}/admin/` : "disabled",
+    connections: store.state.providers.map((p) => p.name),
+    clientKeys: store.state.clientKeys.filter((k) => !k.revokedAt).length,
     exposed: !isLoopback(config.host)
   });
-  if (config.logFormat === "pretty") {
-    const key = config.gatewayApiKey ? "$GATEWAY_API_KEY" : "local";
-    console.log(`\nUse it from Claude Code:\n  ANTHROPIC_BASE_URL=${url} ANTHROPIC_API_KEY=${key} claude\n`);
+  if (setupCode && config.adminEnabled) {
+    logger.warn(`Admin setup code: ${setupCode} — open ${url}/admin/ to set the admin password`);
+  }
+  if (!store.hasActiveClientKeys() && (store.requiresClientKey() || (!isLoopback(config.host) && !config.allowUnauthenticated))) {
+    logger.warn("no client keys yet: Claude Code requests are rejected until you create one in the admin UI");
   }
 });
 
 let shuttingDown = false;
 /** @param {string} signal */
-function shutdown(signal) {
+async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info("shutting down", { signal });
-  server.close(() => process.exit(0));
+  const exit = async () => {
+    await store.flush().catch((err) => logger.error("failed to save store", { error: err.message }));
+    process.exit(0);
+  };
+  server.close(exit);
   server.closeIdleConnections();
   setTimeout(() => {
     logger.warn("in-flight requests did not finish in time; closing them", { timeoutMs: config.shutdownTimeoutMs });
     server.closeAllConnections();
-    process.exit(0);
+    exit();
   }, config.shutdownTimeoutMs).unref();
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -2,14 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
-import { startStack, sse, textChunk, parseAnthropicSse, assertValidAnthropicStream } from "./helpers.js";
-
-const GW_KEY = "gw-key-0123456789abcdef";
+import { startStack, fakeUpstream, sse, textChunk, parseAnthropicSse, assertValidAnthropicStream } from "./helpers.js";
 
 const post = (base, path, body, headers = {}) =>
   fetch(base + path, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": GW_KEY, ...headers },
+    headers: { "content-type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body)
   });
 
@@ -18,44 +16,114 @@ const streamOk = (req, res) => {
   res.end(sse([textChunk("Hi"), { choices: [{ delta: {}, finish_reason: "stop" }] }, { choices: [], usage: { prompt_tokens: 9, completion_tokens: 1 } }]));
 };
 
-test("health is minimal and unauthenticated; no CORS headers anywhere", async (t) => {
-  const s = await startStack(streamOk, { GATEWAY_API_KEY: GW_KEY });
+const hi = { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }], stream: true };
+
+test("health is minimal and unauthenticated; / goes to the admin UI; no CORS", async (t) => {
+  const s = await startStack(streamOk, {}, { clientKey: true });
   t.after(() => s.close());
   const res = await fetch(s.base + "/health");
   assert.deepEqual(await res.json(), { status: "ok" });
   assert.equal(res.headers.get("access-control-allow-origin"), null);
+
+  const root = await fetch(s.base + "/", { redirect: "manual" });
+  assert.equal(root.status, 302);
+  assert.equal(root.headers.get("location"), "/admin/");
 
   const pre = await fetch(s.base + "/v1/messages", { method: "OPTIONS", headers: { origin: "https://evil.example" } });
   assert.equal(pre.headers.get("access-control-allow-origin"), null);
   assert.equal(pre.status, 405);
 });
 
-test("gateway key is required when configured", async (t) => {
-  const s = await startStack(streamOk, { GATEWAY_API_KEY: GW_KEY });
+test("once a client key exists, every request needs a valid one", async (t) => {
+  const s = await startStack(streamOk, {}, { clientKey: true });
   t.after(() => s.close());
-  const body = { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }], stream: true };
 
-  assert.equal((await post(s.base, "/v1/messages", body, { "x-api-key": "" })).status, 401);
-  assert.equal((await post(s.base, "/v1/messages", body, { "x-api-key": "wrong" })).status, 401);
+  assert.equal((await post(s.base, "/v1/messages", hi)).status, 401);
+  assert.equal((await post(s.base, "/v1/messages", hi, { "x-api-key": "cgw_wrong" })).status, 401);
   assert.equal((await fetch(s.base + "/v1/models")).status, 401);
   assert.equal(s.requests.length, 0, "unauthenticated requests must not reach upstream");
 
-  const ok = await post(s.base, "/v1/messages", body, { "x-api-key": "", authorization: `Bearer ${GW_KEY}` });
+  const ok = await post(s.base, "/v1/messages", hi, { authorization: `Bearer ${s.key}` });
   assert.equal(ok.status, 200);
   await ok.text();
-  assert.equal(s.requests[0].headers.authorization, "Bearer upstream-key", "upstream gets the configured key, not the gateway key");
+  assert.equal(s.requests[0].headers.authorization, "Bearer upstream-key", "upstream gets the connection's key, not the client key");
+
+  const key = s.store.state.clientKeys[0];
+  assert.deepEqual(key.usage, { requests: 1, inputTokens: 9, outputTokens: 1 });
+
+  await s.store.revokeClientKey(key.id);
+  const revoked = await post(s.base, "/v1/messages", hi, { "x-api-key": s.key });
+  assert.equal(revoked.status, 401);
+  assert.match((await revoked.json()).error.message, /revoked/);
+  // Even with no key sent and every key gone, a loopback client is not let back in.
+  await s.store.deleteClientKey(key.id);
+  const none = await post(s.base, "/v1/messages", hi);
+  assert.equal(none.status, 401);
+  assert.match((await none.json()).error.message, /No active client keys/);
 });
 
-test("passthrough mode forwards the client's key", async (t) => {
-  const s = await startStack(streamOk, { PASSTHROUGH_CLIENT_KEY: "true", OPENAI_API_KEY: "" });
+test("without client keys: open only for direct loopback on a loopback-bound gateway", async (t) => {
+  const local = await startStack(streamOk);
+  t.after(() => local.close());
+  const ok = await post(local.base, "/v1/messages", hi);
+  assert.equal(ok.status, 200);
+  await ok.text();
+  // Proxied (e.g. tailscale serve) requests are not "local", even from 127.0.0.1.
+  assert.equal((await post(local.base, "/v1/messages", hi, { "x-forwarded-for": "100.100.1.1" })).status, 401);
+
+  const exposed = await startStack(streamOk, { HOST: "0.0.0.0" });
+  t.after(() => exposed.close());
+  const res = await post(exposed.base, "/v1/messages", hi);
+  assert.equal(res.status, 401);
+  assert.match((await res.json()).error.message, /admin UI/);
+
+  const allowed = await startStack(streamOk, { HOST: "0.0.0.0", ALLOW_UNAUTHENTICATED: "true" });
+  t.after(() => allowed.close());
+  const r2 = await post(allowed.base, "/v1/messages", hi);
+  assert.equal(r2.status, 200);
+  await r2.text();
+});
+
+test("routes across connections, and route changes apply without restart", async (t) => {
+  const s = await startStack(streamOk);
   t.after(() => s.close());
-  const res = await post(s.base, "/v1/messages", { messages: [], stream: true }, { "x-api-key": "sk-client" });
-  await res.text();
-  assert.equal(s.requests[0].headers.authorization, "Bearer sk-client");
+  const second = await fakeUpstream(streamOk);
+  t.after(() => second.close());
+  const local = await s.store.addProvider({ name: "Local", baseUrl: second.url, apiKey: "local-key" });
+  await s.store.setRoutes({ default: { provider: s.provider.id, model: "big-model" }, haiku: { provider: local.id, model: "small-model" } });
+
+  await (await post(s.base, "/v1/messages", { ...hi, model: "claude-haiku-4-5-20251001" })).text();
+  await (await post(s.base, "/v1/messages", { ...hi, model: "claude-opus-5-5" })).text();
+  assert.equal(second.requests.length, 1);
+  assert.equal(second.requests[0].body.model, "small-model");
+  assert.equal(second.requests[0].headers.authorization, "Bearer local-key");
+  assert.equal(s.requests.length, 1);
+  assert.equal(s.requests[0].body.model, "big-model");
+
+  await s.store.setRoutes({ default: { provider: local.id, model: "everything" } });
+  await (await post(s.base, "/v1/messages", { ...hi, model: "claude-opus-5-5" })).text();
+  assert.equal(second.requests.at(-1).body.model, "everything");
 });
 
-test("streaming end to end: model mapping and valid Anthropic events", async (t) => {
-  const s = await startStack(streamOk, { MODEL_HAIKU: "small-model", DEFAULT_MODEL: "big-model" });
+test("per-connection max output tokens apply", async (t) => {
+  const s = await startStack(streamOk, {}, { store: { provider: { maxOutputTokens: 4096 } } });
+  t.after(() => s.close());
+  await (await post(s.base, "/v1/messages", { ...hi, max_tokens: 64000 })).text();
+  assert.equal(s.requests[0].body.max_tokens, 4096);
+});
+
+test("no route configured → 503 pointing at the admin UI", async (t) => {
+  const s = await startStack(streamOk);
+  t.after(() => s.close());
+  await s.store.setRoutes({ default: { provider: s.provider.id, model: "m" } });
+  s.store.state.routes.default = null; // simulate an unconfigured gateway
+  const res = await post(s.base, "/v1/messages", hi);
+  assert.equal(res.status, 503);
+  assert.match((await res.json()).error.message, /admin/);
+});
+
+test("streaming end to end: valid Anthropic events", async (t) => {
+  const s = await startStack(streamOk);
   t.after(() => s.close());
   const res = await post(s.base, "/v1/messages?beta=true", {
     model: "claude-haiku-4-5-20251001",
@@ -70,7 +138,7 @@ test("streaming end to end: model mapping and valid Anthropic events", async (t)
   assertValidAnthropicStream(events, assert);
   assert.equal(events[0][1].message.model, "claude-haiku-4-5-20251001");
   assert.equal(events.at(-2)[1].usage.input_tokens, 9);
-  assert.equal(s.requests[0].body.model, "small-model");
+  assert.equal(s.requests[0].body.model, "upstream-model");
   assert.equal(s.requests[0].url, "/v1/chat/completions");
 });
 
@@ -168,7 +236,7 @@ test("upstream errors map to Anthropic types; context overflow → prompt is too
 });
 
 test("unreachable upstream → 502 api_error", async (t) => {
-  const s = await startStack(streamOk, { OPENAI_BASE_URL: "http://127.0.0.1:1/v1" });
+  const s = await startStack(streamOk, {}, { store: { baseUrl: "http://127.0.0.1:1/v1" } });
   t.after(() => s.close());
   const res = await post(s.base, "/v1/messages", { messages: [], stream: true });
   assert.equal(res.status, 502);

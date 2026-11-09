@@ -10,18 +10,30 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const DEFAULT_REASONING_PATTERN = /(^|\/)(o\d+(-|$)|gpt-5)|reasoner/i;
 
 /**
+ * Values from the environment used only to seed the store on first start.
+ * After that, connections, routes and keys are managed in the admin UI.
+ *
+ * @typedef {object} Seed
+ * @property {string} baseUrl
+ * @property {string} apiKey
+ * @property {string} defaultModel
+ * @property {{ opus?: string, sonnet?: string, haiku?: string }} familyModels  Only explicitly set ones
+ * @property {Record<string, string>} modelMap
+ * @property {string} reasoningPattern  Source of REASONING_MODELS, or ""
+ * @property {number | null} maxOutputTokens
+ * @property {string} gatewayApiKey
+ * @property {string} adminPassword
+ */
+
+/**
  * @typedef {object} Config
  * @property {number} port
  * @property {string} host
- * @property {string} upstreamBaseUrl
- * @property {string} upstreamApiKey
- * @property {string} gatewayApiKey
- * @property {boolean} passthroughClientKey
- * @property {string} defaultModel
- * @property {{ opus: string, sonnet: string, haiku: string }} familyModels
- * @property {Record<string, string>} modelMap
- * @property {RegExp} reasoningPattern
- * @property {number | null} maxOutputTokens
+ * @property {string} dataFile         Path of the JSON store, or "" for in-memory
+ * @property {boolean} allowUnauthenticated
+ * @property {boolean} adminEnabled
+ * @property {"local" | "any"} adminAllowFrom  "local" = loopback, private networks and Tailscale
+ * @property {string[]} adminHosts     Extra Host header names allowed for the admin UI
  * @property {number} maxBodyBytes
  * @property {number} upstreamTimeoutMs
  * @property {number} streamIdleTimeoutMs
@@ -29,6 +41,7 @@ export const DEFAULT_REASONING_PATTERN = /(^|\/)(o\d+(-|$)|gpt-5)|reasoner/i;
  * @property {"json" | "pretty"} logFormat
  * @property {"debug" | "info" | "warn" | "error"} logLevel
  * @property {number} shutdownTimeoutMs
+ * @property {Seed} seed
  * @property {string[]} warnings
  */
 
@@ -69,53 +82,25 @@ export function loadConfig(env, meta = {}) {
     }
     return n;
   };
-  const bool = (/** @type {string} */ key) => /^(1|true|yes|on)$/i.test(get(key));
-
-  const port = int("PORT", 8080, 0, 65535);
-  const host = get("HOST", "127.0.0.1");
-
-  const upstreamBaseUrl = get("OPENAI_BASE_URL", "https://api.openai.com/v1").replace(/\/+$/, "");
-  try {
-    const u = new URL(upstreamBaseUrl);
-    if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error();
-  } catch {
-    problems.push(`OPENAI_BASE_URL must be an http(s) URL (got "${upstreamBaseUrl}")`);
-  }
-
-  const upstreamApiKey = get("OPENAI_API_KEY");
-  const gatewayApiKey = get("GATEWAY_API_KEY");
-  const passthroughClientKey = bool("PASSTHROUGH_CLIENT_KEY");
-  const allowUnauthenticated = bool("ALLOW_UNAUTHENTICATED");
-
-  if (!upstreamApiKey && !passthroughClientKey) {
-    const refs = meta.unresolved?.OPENAI_API_KEY;
-    problems.push(
-      refs
-        ? `OPENAI_API_KEY in .env references \${${refs.join("}, ${")}}, which is not set in your shell`
-        : "OPENAI_API_KEY is not set (use any non-empty value for keyless providers like Ollama), " +
-            "or set PASSTHROUGH_CLIENT_KEY=true to forward each client's own key"
-    );
-  }
-  if (passthroughClientKey && gatewayApiKey) {
-    warnings.push("GATEWAY_API_KEY is ignored when PASSTHROUGH_CLIENT_KEY=true (the client key is forwarded upstream)");
-  }
-  if (!isLoopback(host) && !gatewayApiKey && !passthroughClientKey && !allowUnauthenticated) {
-    problems.push(
-      `HOST=${host} exposes the gateway beyond this machine without authentication. ` +
-        "Set GATEWAY_API_KEY (clients send it as ANTHROPIC_API_KEY), or ALLOW_UNAUTHENTICATED=true if " +
-        "something else already restricts access"
-    );
-  }
-  if (gatewayApiKey && gatewayApiKey.length < 16) {
-    warnings.push("GATEWAY_API_KEY is shorter than 16 characters; consider `openssl rand -hex 24`");
-  }
-
-  const defaultModel = get("DEFAULT_MODEL", "gpt-4o");
-  const familyModels = {
-    opus: get("MODEL_OPUS", defaultModel),
-    sonnet: get("MODEL_SONNET", defaultModel),
-    haiku: get("MODEL_HAIKU", defaultModel)
+  const bool = (/** @type {string} */ key, fallback = false) => {
+    const raw = get(key);
+    return raw ? /^(1|true|yes|on)$/i.test(raw) : fallback;
   };
+
+  // ── Seed values (first start only) ──────────────────────────────────────
+  const baseUrl = get("OPENAI_BASE_URL").replace(/\/+$/, "");
+  if (baseUrl) {
+    try {
+      const u = new URL(baseUrl);
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error();
+    } catch {
+      problems.push(`OPENAI_BASE_URL must be an http(s) URL (got "${baseUrl}")`);
+    }
+  }
+  const unresolvedKey = meta.unresolved?.OPENAI_API_KEY;
+  if (unresolvedKey && !get("OPENAI_API_KEY")) {
+    warnings.push(`OPENAI_API_KEY in .env references \${${unresolvedKey.join("}, ${")}}, which is not set in your shell`);
+  }
 
   /** @type {Record<string, string>} */
   let modelMap = {};
@@ -133,41 +118,64 @@ export function loadConfig(env, meta = {}) {
     }
   }
 
-  let reasoningPattern = DEFAULT_REASONING_PATTERN;
-  const rawPattern = get("REASONING_MODELS");
-  if (rawPattern) {
+  const reasoningPattern = get("REASONING_MODELS");
+  if (reasoningPattern) {
     try {
-      reasoningPattern = new RegExp(rawPattern, "i");
+      new RegExp(reasoningPattern, "i");
     } catch (err) {
       problems.push(`REASONING_MODELS must be a valid regular expression (${/** @type {Error} */ (err).message})`);
     }
   }
 
-  const maxOutputTokensRaw = int("MAX_OUTPUT_TOKENS", 0, 0);
-  const logFormatRaw = get("LOG_FORMAT", meta.stdoutIsTTY ? "pretty" : "json");
-  if (logFormatRaw !== "json" && logFormatRaw !== "pretty") problems.push(`LOG_FORMAT must be "json" or "pretty"`);
-  const logLevelRaw = get("LOG_LEVEL", "info");
-  if (!["debug", "info", "warn", "error"].includes(logLevelRaw)) problems.push(`LOG_LEVEL must be debug, info, warn or error`);
-
-  const config = {
-    port,
-    host,
-    upstreamBaseUrl,
-    upstreamApiKey,
-    gatewayApiKey: passthroughClientKey ? "" : gatewayApiKey,
-    passthroughClientKey,
+  const defaultModel = get("DEFAULT_MODEL", "gpt-4o");
+  /** @type {Seed} */
+  const seed = {
+    baseUrl,
+    apiKey: get("OPENAI_API_KEY"),
     defaultModel,
-    familyModels,
+    familyModels: Object.fromEntries(
+      [["opus", "MODEL_OPUS"], ["sonnet", "MODEL_SONNET"], ["haiku", "MODEL_HAIKU"]]
+        .filter(([, key]) => get(key))
+        .map(([family, key]) => [family, get(key)])
+    ),
     modelMap,
     reasoningPattern,
-    maxOutputTokens: maxOutputTokensRaw || null,
+    maxOutputTokens: int("MAX_OUTPUT_TOKENS", 0, 0) || null,
+    gatewayApiKey: get("GATEWAY_API_KEY"),
+    adminPassword: get("ADMIN_PASSWORD")
+  };
+  if (seed.adminPassword && seed.adminPassword.length < 10) problems.push("ADMIN_PASSWORD must be at least 10 characters");
+
+  // ── Server settings ─────────────────────────────────────────────────────
+  const host = get("HOST", "127.0.0.1");
+  const adminAllowFrom = get("ADMIN_ALLOW_FROM", "local");
+  if (adminAllowFrom !== "local" && adminAllowFrom !== "any") problems.push(`ADMIN_ALLOW_FROM must be "local" or "any"`);
+  const dataDir = get("DATA_DIR", path.join(ROOT, "data"));
+
+  const logFormat = get("LOG_FORMAT", meta.stdoutIsTTY ? "pretty" : "json");
+  if (logFormat !== "json" && logFormat !== "pretty") problems.push(`LOG_FORMAT must be "json" or "pretty"`);
+  const logLevel = get("LOG_LEVEL", "info");
+  if (!["debug", "info", "warn", "error"].includes(logLevel)) problems.push(`LOG_LEVEL must be debug, info, warn or error`);
+
+  const config = {
+    port: int("PORT", 8080, 0, 65535),
+    host,
+    dataFile: dataDir === "none" ? "" : path.resolve(dataDir, "gateway.json"),
+    allowUnauthenticated: bool("ALLOW_UNAUTHENTICATED"),
+    adminEnabled: bool("ADMIN_ENABLED", true),
+    adminAllowFrom: /** @type {"local" | "any"} */ (adminAllowFrom),
+    adminHosts: get("ADMIN_HOSTS")
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean),
     maxBodyBytes: int("MAX_BODY_MB", 32, 1, 1024) * 1024 * 1024,
     upstreamTimeoutMs: int("UPSTREAM_TIMEOUT_MS", 300_000, 1000),
     streamIdleTimeoutMs: int("STREAM_IDLE_TIMEOUT_MS", 300_000, 1000),
     maxRetries: int("UPSTREAM_MAX_RETRIES", 2, 0, 10),
-    logFormat: /** @type {"json" | "pretty"} */ (logFormatRaw),
-    logLevel: /** @type {Config["logLevel"]} */ (logLevelRaw),
+    logFormat: /** @type {"json" | "pretty"} */ (logFormat),
+    logLevel: /** @type {Config["logLevel"]} */ (logLevel),
     shutdownTimeoutMs: int("SHUTDOWN_TIMEOUT_MS", 8000, 0),
+    seed,
     warnings
   };
 

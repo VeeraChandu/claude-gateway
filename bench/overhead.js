@@ -4,6 +4,8 @@ import http from "node:http";
 import { once } from "node:events";
 import { loadConfig } from "../src/config.js";
 import { createGateway } from "../src/server.js";
+import { Store } from "../src/store.js";
+import { silentLogger } from "../src/logger.js";
 
 const CHUNKS = 500;
 const RUNS = 30;
@@ -22,7 +24,9 @@ upstream.listen(0, "127.0.0.1");
 await once(upstream, "listening");
 const upstreamUrl = `http://127.0.0.1:${upstream.address().port}`;
 
-const gateway = createGateway(loadConfig({ OPENAI_API_KEY: "x", OPENAI_BASE_URL: `${upstreamUrl}/v1` }));
+const store = await Store.open({ file: "", logger: silentLogger });
+await store.addProvider({ name: "bench", baseUrl: `${upstreamUrl}/v1`, apiKey: "x", defaultModel: "m" });
+const gateway = createGateway(loadConfig({ DATA_DIR: "none" }), { store });
 gateway.listen(0, "127.0.0.1");
 await once(gateway, "listening");
 const gatewayUrl = `http://127.0.0.1:${gateway.address().port}`;
