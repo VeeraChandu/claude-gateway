@@ -1,15 +1,18 @@
 services:
   gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: claude-openai-gateway:latest
-    container_name: claude-openai-gateway
+    build: .
+    image: claude-gateway:latest
+    container_name: claude-gateway
     restart: unless-stopped
+    init: true # forwards SIGTERM so in-flight streams finish before shutdown
     ports:
-      - "${PORT:-5175}:5175"
+      # Published on the host's loopback only. Change to "${DOCKER_PORT:-5175}:8080"
+      # to expose on your network (GATEWAY_API_KEY is then essential).
+      - "127.0.0.1:${DOCKER_PORT:-5175}:8080"
     env_file:
       - .env
     environment:
-      - HOST=0.0.0.0
-      - PORT=5175
+      HOST: 0.0.0.0
+      PORT: 8080
+      # Required: the container listens on 0.0.0.0, so the gateway refuses to start unauthenticated.
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Set GATEWAY_API_KEY in .env (e.g. openssl rand -hex 24)}

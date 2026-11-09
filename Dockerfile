@@ -1,21 +1,23 @@
 FROM alpine:3.21
 
-# Install only nodejs runtime (no npm, corepack, or build tools)
-RUN apk add --no-cache nodejs ca-certificates tzdata && \
-    rm -rf /var/cache/apk/*
+# Node runtime only — no npm or build tools needed (zero dependencies).
+RUN apk add --no-cache nodejs ca-certificates tzdata
 
 WORKDIR /app
+COPY package.json server.js ./
+COPY src ./src
 
-# Copy source code (zero external dependencies needed)
-COPY config.js translator.js server.js package.json ./
-
-# Run as non-root user for security
 USER nobody
 
-ENV NODE_ENV=production
-ENV HOST=0.0.0.0
-ENV PORT=8080
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=8080 \
+    LOG_FORMAT=json \
+    ENV_FILE=none
 
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT}/health" >/dev/null || exit 1
 
 ENTRYPOINT ["node", "server.js"]
