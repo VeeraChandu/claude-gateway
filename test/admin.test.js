@@ -188,7 +188,7 @@ test("routes and resolver", async (t) => {
   const id = s.provider.id;
   const put = await c.call("PUT", "/routes", { default: { provider: id, model: "big" }, haiku: { provider: id, model: "small" }, overrides: [] });
   assert.equal(put.status, 200);
-  assert.deepEqual((await c.call("GET", "/resolve?model=claude-haiku-4-5")).data, { provider: "Fake", model: "small", rule: "haiku" });
+  assert.deepEqual((await c.call("GET", "/resolve?model=claude-haiku-4-5")).data, { provider: "Fake", model: "small", rule: "haiku", fallbacks: [] });
   assert.equal((await c.call("PUT", "/routes", { default: { provider: "prv_nope", model: "x" } })).status, 400);
 });
 
@@ -205,6 +205,12 @@ test("client keys: secret shown once, usage and activity tracked, revoke", async
   const state = (await c.call("GET", "/state")).data;
   assert.ok(!JSON.stringify(state).includes(secret));
   assert.ok(state.clientKeys.every((k) => k.hash === undefined));
+  assert.equal(state.clientKeys[0].copyable, true);
+  assert.equal((await c.call("GET", `/keys/${created.data.key.id}/secret`)).data.secret, secret, "can be copied again later");
+  const renamed = await c.call("PATCH", `/keys/${created.data.key.id}`, { name: "laptop" });
+  assert.equal(renamed.data.name, "laptop");
+  assert.equal(renamed.data.secret, undefined);
+  assert.equal((await c.call("PATCH", `/keys/${created.data.key.id}`, { name: " " })).status, 400);
 
   const res = await fetch(`${s.base}/v1/messages`, {
     method: "POST",
@@ -225,6 +231,8 @@ test("client keys: secret shown once, usage and activity tracked, revoke", async
   assert.equal((await c.call("POST", `/keys/${created.data.key.id}/revoke`)).status, 200);
   const denied = await fetch(`${s.base}/v1/messages`, { method: "POST", headers: { "x-api-key": secret }, body: "{}" });
   assert.equal(denied.status, 401);
+  assert.equal((await c.call("GET", `/keys/${created.data.key.id}/secret`)).status, 404, "a revoked key can't be copied");
+  assert.equal((await c.call("GET", "/state")).data.clientKeys[0].copyable, false);
 });
 
 test("changing the password signs out other sessions", async (t) => {
@@ -234,8 +242,8 @@ test("changing the password signs out other sessions", async (t) => {
   await other.call("POST", "/login", { password: PASSWORD });
   assert.equal((await other.call("GET", "/state")).status, 200);
 
-  assert.equal((await c.call("POST", "/password", { current: "wrong password", next: "brand new password" })).status, 401);
-  assert.equal((await c.call("POST", "/password", { current: PASSWORD, next: "brand new password" })).status, 200);
+  assert.equal((await c.call("POST", "/password", { next: "short" })).status, 400, "length rule still applies");
+  assert.equal((await c.call("POST", "/password", { next: "brand new password" })).status, 200);
   assert.equal((await c.call("GET", "/state")).status, 200, "the session that changed it stays signed in");
   assert.equal((await other.call("GET", "/state")).status, 401);
 });

@@ -281,8 +281,8 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
       return json(res, 200, { entries: activity.list(100) });
     }
     if (route === "/password" && method === "POST") {
+      // No current-password check: only a signed-in session reaches this.
       const body = await readBody(req);
-      if (!(await store.verifyAdminPassword(body.current))) throw new StoreError(401, "Current password is wrong");
       await store.setAdminPassword(body.next);
       // Sign out every other session.
       const keep = cookieToken(req);
@@ -333,13 +333,17 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
     if (route.startsWith("/resolve") && method === "GET") {
       const model = new URL(req.url || "", "http://x").searchParams.get("model") || "";
       const r = resolveRoute(model, store.state);
-      return json(res, 200, r ? { provider: r.provider.name, model: r.model, rule: r.rule } : null);
+      return json(res, 200, r ? { provider: r.provider.name, model: r.model, rule: r.rule, fallbacks: r.fallbacks.map((f) => `${f.provider.name} / ${f.model}`) } : null);
     }
 
     if (route === "/keys" && method === "POST") {
       const { key, secret } = await store.createClientKey((await readBody(req)).name);
       logger.info("client key created", { name: key.name });
-      return json(res, 201, { key: { ...key, hash: undefined }, secret });
+      return json(res, 201, { key: { ...key, hash: undefined, secret: undefined }, secret });
+    }
+    m = route.match(/^\/keys\/([\w-]+)\/secret$/);
+    if (m && method === "GET") {
+      return json(res, 200, { secret: store.clientKeySecret(m[1]) });
     }
     m = route.match(/^\/keys\/([\w-]+)(\/revoke)?$/);
     if (m) {
@@ -347,7 +351,11 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
       if (revoke && method === "POST") {
         const key = await store.revokeClientKey(id);
         logger.info("client key revoked", { name: key.name });
-        return json(res, 200, { ...key, hash: undefined });
+        return json(res, 200, { ...key, hash: undefined, secret: undefined });
+      }
+      if (!revoke && method === "PATCH") {
+        const key = await store.renameClientKey(id, (await readBody(req)).name);
+        return json(res, 200, { ...key, hash: undefined, secret: undefined });
       }
       if (!revoke && method === "DELETE") {
         await store.deleteClientKey(id);

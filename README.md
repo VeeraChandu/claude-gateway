@@ -1,4 +1,4 @@
-# Claude Code Gateway
+# Claude Gateway
 
 A small, zero-dependency Node.js gateway that lets **Claude Code** talk to **OpenAI** or any
 OpenAI-compatible provider (Venice, DeepSeek, Groq, Ollama, vLLM, OpenRouter, …). It translates
@@ -9,15 +9,17 @@ the Anthropic Messages API, including streaming, tool use, images, and thinking,
 - **Low overhead.** About 3 ms added to time-to-first-byte and about 0.01 ms per streamed
   chunk on a laptop (`npm run bench` measures it on yours against a local fake upstream).
 - **Built for Claude Code.** Model families route automatically. Context overflows trigger
-  Claude Code's auto-compaction. Rate limits are retried. Pressing Esc stops upstream generation.
+  Claude Code's auto-compaction. Pressing Esc stops upstream generation.
+- **Fallbacks.** Give any route backup providers. When one is rate-limited, out of quota or down,
+  requests move to the next, so a capped free tier doesn't stop your session.
 
 ## Quick start
 
 Requires Node.js 20.12 or newer.
 
 ```bash
-git clone https://github.com/VeeraChandu/claude-code-gateway.git
-cd claude-code-gateway
+git clone https://github.com/VeeraChandu/claude-gateway.git
+cd claude-gateway
 cp .env.example .env      # optional: seeds your first connection
 npm start
 ```
@@ -28,9 +30,9 @@ and choose an admin password. Then:
 1. **Connections**: add a provider (OpenAI, Venice, DeepSeek, Groq, OpenRouter, Ollama, or any
    OpenAI-compatible URL). **Test connection** checks the key and lists the provider's models.
 2. **Routing**: pick the connection and model for the default route and, optionally, for Opus,
-   Sonnet, and Haiku.
-3. **Client keys**: create a key per device. The key is shown once, together with the two
-   `export` lines that point Claude Code at the gateway.
+   Sonnet, and Haiku. Add fallbacks to any of them.
+3. **Client keys**: create a key per device, then use **Copy** beside it to get the `export`
+   lines that point Claude Code at the gateway, with the key filled in.
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
@@ -43,19 +45,21 @@ claude
 
 ## Admin UI
 
-Served at `/admin` by the gateway itself (plain HTML/JS, no build step):
+Served at `/admin` by the gateway itself (plain HTML/JS, no build step). A sidebar shows a status
+dot and count for each page; **⌘K** / **Ctrl K** jumps to any page or action.
 
 | Page | |
 | :-- | :-- |
-| **Overview** | Requests, errors, and token totals; a live table of recent requests showing which key, model, connection, and upstream model each used, plus status, stop reason, tokens, and time to first token |
-| **Connections** | Add, edit, test, and delete providers. Each has its own API key, auth scheme, output-token cap, and reasoning-model pattern. Keys are write-only: the UI only ever shows `sk-…a9f2` |
-| **Routing** | Connection + model per Claude family (Opus, Sonnet, Haiku, Fable); **your models**, any number of extra entries for Claude Code's `/model` picker; prefix overrides; and a "test a model name" resolver. Changes apply to the next request, with no restart |
-| **Client keys** | Create, revoke, and delete keys. Shows last use, request count, and token totals per key |
-| **Settings** | Change the admin password (signs out other sessions); server info |
+| **Overview** | Request, error and token totals since the last restart; a health card per connection; a live table of recent requests that you can filter by errors or key. Click a request to see its error, the target that served it, parameters it was retried without, and any fallbacks it went through |
+| **Connections** | Add, edit, test and delete providers. Each has its own API key, auth scheme, output-token cap and reasoning-model pattern, and shows its health and the routes that use it. Delete stays disabled while a route (or fallback) uses the connection. Keys are write-only: the UI only shows `sk-…a9f2` |
+| **Routing** | One table of rules in the order they're checked: your models, overrides, families, default. Connections are picked from a dropdown that shows their health; upstream models from a searchable list of what the provider offers (or type any name). **+ Fallback** adds backup targets to a rule. A bar shows unsaved changes, and leaving the page asks first. **Test a model name** shows where a name would go |
+| **Client keys** | Create, rename (click the name), copy, revoke and delete keys, with last use, request count and token totals. **Copy** gives the setup lines for that device with its key filled in |
+| **Settings** | Change the admin password (signs out other sessions); server facts and the environment variables behind them |
 
-Everything lives in `data/gateway.json` (mode `0600`, written atomically). Provider keys are stored
-as-is because the gateway must send them. Client keys are stored only as SHA-256 hashes, and the
-admin password as an scrypt hash. Back the file up like any other secret.
+Everything lives in `data/gateway.json` (mode `0600`, written atomically). Provider keys and client
+keys are stored as-is: the gateway must send provider keys, and client keys are kept so **Copy** can
+show them again (a revoked key's copy is deleted; keys made before v2.1 exist only as a SHA-256 hash
+and can't be copied). The admin password is an scrypt hash. Back the file up like any other secret.
 
 ## Running on a server with Tailscale
 
@@ -78,28 +82,49 @@ For either setup, use `deploy/claude-gateway.service`, a hardened systemd unit w
 its header. Read the setup code with `journalctl -u claude-gateway | grep "setup code"`. With Docker,
 set `DOCKER_BIND` to `127.0.0.1` (for `tailscale serve`) or to your Tailscale IP.
 
-On each device:
+On each device, paste the lines from **Copy** on the Client keys page (they use the address you
+opened the admin page with), or set them by hand:
 
 ```bash
 export ANTHROPIC_BASE_URL=https://<machine>.<tailnet>.ts.net    # or http://100.x.y.z:8080
 export ANTHROPIC_API_KEY=cgw_…
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 ```
+
+Add them to `~/.zshrc` or `~/.bashrc` to keep them.
 
 ### Docker
 
 ```bash
-docker compose up -d
+cp .env.example .env               # optional: seeds your first connection, sets DOCKER_BIND/DOCKER_PORT
+docker compose up -d --build
 docker compose logs gateway | grep "setup code"
 ```
 
-Data is kept in the `gateway-data` volume. Compose publishes on `DOCKER_BIND:DOCKER_PORT`
-(default `127.0.0.1:5175`). The image has a healthcheck and shuts down gracefully, saving usage counters.
+Then open <http://127.0.0.1:5175/admin/>, enter the setup code and choose a password, or set
+`ADMIN_PASSWORD` in `.env` to skip that step. Point Claude Code at the same address
+(`ANTHROPIC_BASE_URL=http://127.0.0.1:5175`); **Copy** on the Client keys page fills it in.
+
+- **Port and bind address.** Compose publishes on `DOCKER_BIND:DOCKER_PORT`, default
+  `127.0.0.1:5175`. For the tailnet, set `DOCKER_BIND` to `127.0.0.1` and run
+  `tailscale serve --bg 5175`, or set it to the server's Tailscale IP. Never `0.0.0.0` on a public server.
+- **Client keys are always required.** Inside the container the gateway listens on `0.0.0.0`, so the
+  loopback-only "no key yet" mode doesn't apply: create a client key before using Claude Code.
+- **Settings.** `.env` is read by Compose (`${VAR}` expands from your shell). `HOST`, `PORT` and
+  `DATA_DIR` are fixed by the compose file; change the published port with `DOCKER_PORT` instead.
+- **Data.** Connections, routes, client keys and the admin password live in the `gateway-data`
+  volume, so they survive rebuilds. Back it up with
+  `docker exec claude-gateway cat /data/gateway.json > gateway-backup.json` (keep it private: it
+  holds your keys).
+- **Upgrading.** `git pull && docker compose up -d --build`. The image has a healthcheck and shuts
+  down gracefully, saving usage counters.
 
 ## Security
 
 The gateway holds your provider API keys, so anything that can use it can spend your credits.
 
-- **Client keys.** Once you create the first client key, every `/v1` request needs a valid,
+- **Client keys.** Kept in the data file so the admin UI can copy them again (see above); anyone who
+  can read that file can already read your provider keys. Once you create the first client key, every `/v1` request needs a valid,
   unrevoked key. Revoking or deleting every key locks the gateway; it doesn't reopen it. Before the
   first key exists, only direct loopback connections to a loopback-bound gateway are allowed, so a
   fresh install works locally. Requests through a proxy (with `X-Forwarded-For`, as `tailscale serve`
@@ -178,7 +203,7 @@ Server settings are environment variables, usually in `.env`. Your shell's value
 | `ALLOW_UNAUTHENTICATED` | `false` | Serve `/v1` without client keys on a non-loopback `HOST` |
 | `UPSTREAM_TIMEOUT_MS` | `300000` | Max wait for upstream response headers |
 | `STREAM_IDLE_TIMEOUT_MS` | `300000` | Max gap between streamed chunks |
-| `UPSTREAM_MAX_RETRIES` | `2` | Retries for 408/429/5xx/network errors (before streaming starts; honors `Retry-After`) |
+| `UPSTREAM_MAX_RETRIES` | `2` | Retries for 408/429/5xx/network errors (before streaming starts; honors `Retry-After`). With fallbacks, only the last target retries; the others hand over at once |
 | `MAX_BODY_MB` | `32` | Request size limit |
 | `LOG_FORMAT` / `LOG_LEVEL` | `pretty` on a TTY, else `json` / `info` | Logging |
 
@@ -221,6 +246,28 @@ If the same gateway also serves Claude Desktop, keep those IDs free of vendor na
    family's route, so new releases need no changes. Families without a route use the default.
    Point Haiku at a cheap model: Claude Code makes many small background calls with it.
 4. **Anything else** uses the default route.
+
+### Fallbacks
+
+Any rule (default, a family, one of your models, or an override) can have up to five fallbacks:
+other connection + model pairs, tried in order. Add them with **+ Fallback** on the Routing page.
+
+- **When the gateway moves on:** the target answered 429 (rate limit) or 402 (quota), was overloaded
+  or down (408, 5xx, 529), or couldn't be reached. Errors caused by the request itself (400, 401, …)
+  are returned as they are.
+- **No waiting:** a target with a fallback after it isn't retried with backoff; the request goes to
+  the next one at once. Only the last target uses `UPSTREAM_MAX_RETRIES`.
+- **Cooldown:** a target that returned 429 or 402 is tried last for as long as its `Retry-After`
+  says (capped at an hour), or a minute if it doesn't say. Its first success ends the cooldown.
+  Cooldowns are in memory and reset when the gateway restarts.
+- **Visible:** requests served by a fallback carry a *fallback* tag in **Overview**, with the
+  targets passed over and why. The connection's health card shows *rate-limited · using fallback*.
+- A family set to *Same as default* uses the default's fallbacks.
+- Fallbacks happen before any of the reply is sent. If a provider fails partway through a streamed
+  reply, the error reaches Claude Code.
+
+A free tier with a cap, like NVIDIA's, works well as the first target with a paid provider as its
+fallback.
 
 ### Claude Desktop
 
@@ -345,7 +392,10 @@ Model discovery needs the gateway reachable at `inferenceGatewayBaseUrl` when th
 | `400 … max_tokens is too large` | Set the connection's **Max output tokens** to the model's limit |
 | `400 … temperature / max_tokens unsupported` | Handled automatically (the gateway retries without them). Set the connection's **Reasoning models** pattern only if you want to avoid the first 400 |
 | `401 … from an Azure endpoint` | Set the connection's **Auth scheme** to a custom header named `api-key`, and add `api-version=…` under **Query parameters** |
-| `401 Missing / invalid client key` | Set `ANTHROPIC_API_KEY` to an active key from **Client keys** |
+| `401 Missing / invalid client key` | Set `ANTHROPIC_API_KEY` to an active key from **Client keys** (use **Copy** beside it) |
+| **Copy** beside a key is disabled | The key was made before keys were kept, so only its hash exists. Create a new key for that device and revoke the old one |
+| A free provider keeps hitting its cap | Add a fallback to its route under **Routing → + Fallback** |
+| **Copy** opens a dialog instead of copying | Browsers block the clipboard on plain `http://` addresses other than localhost. Press ⌘C / Ctrl+C; the text is already selected |
 | `503 No connection configured` | Add a connection and a default route in the admin UI |
 | `/admin` returns 404 from another machine | It's only served to local, private, and Tailscale addresses (`ADMIN_ALLOW_FROM`) |
 | `/admin` says the Host is not allowed | Browse by IP, MagicDNS name, or `*.ts.net`, or add the name to `ADMIN_HOSTS` |
@@ -371,9 +421,9 @@ runs `tsc` over the JSDoc types, and builds the Docker image and checks that it 
 server.js              entry point: config, logging, signals
 src/config.js          env loading and validation
 src/store.js           persistent connections, routes, client keys, admin password
-src/models.js          model routing across connections, reasoning-model detection
+src/models.js          model routing across connections (with fallbacks), reasoning-model detection
 src/model-names.js     Claude Desktop's vendor-name filter and safe model-ID suggestions
-src/server.js          HTTP routing, client auth, body limits, streaming pipeline
+src/server.js          HTTP routing, client auth, body limits, fallbacks and cooldowns, streaming pipeline
 src/admin/             admin API (sessions, CSRF/Host/IP checks) and the UI in public/
 src/net.js             address and Host header checks
 src/activity.js        recent-request log and totals

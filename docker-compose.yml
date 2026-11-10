@@ -10,7 +10,8 @@ services:
       # the server's Tailscale IP (100.x.y.z). Never 0.0.0.0 on a public server.
       - "${DOCKER_BIND:-127.0.0.1}:${DOCKER_PORT:-5175}:8080"
     env_file:
-      - .env
+      - path: .env
+        required: false # .env is optional: without it, set everything up in the admin UI
     environment:
       HOST: 0.0.0.0
       PORT: 8080

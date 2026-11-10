@@ -16,6 +16,7 @@
  * @property {number} [inputTokens]
  * @property {number} [outputTokens]
  * @property {string[]} [droppedParams]  Parameters the upstream rejected and the gateway retried without
+ * @property {string[]} [fallbacks]  Targets passed over before the one that served, with the reason
  * @property {string} [error]
  */
 

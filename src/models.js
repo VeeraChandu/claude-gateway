@@ -16,16 +16,26 @@ import { DEFAULT_REASONING_PATTERN } from "./config.js";
  *    fall back to the default route.
  * 4. Anything else uses the default route.
  *
+ * The route's fallbacks come along, resolved to their connections, in the order
+ * they should be tried.
+ *
  * @param {string | undefined} requested
  * @param {State} state
- * @returns {{ provider: Provider, model: string, rule: string } | null}
+ * @returns {{ provider: Provider, model: string, rule: string, fallbacks: { provider: Provider, model: string }[] } | null}
  */
 export function resolveRoute(requested, state) {
   const { routes } = state;
-  /** @param {{ provider: string, model: string } | null} r @param {string} rule */
+  /** @param {string} id */
+  const conn = (id) => state.providers.find((p) => p.id === id);
+  /** @param {import("./store.js").Route | null} r @param {string} rule */
   const pick = (r, rule) => {
-    const provider = r && state.providers.find((p) => p.id === r.provider);
-    return provider ? { provider, model: /** @type {{ model: string }} */ (r).model, rule } : null;
+    const provider = r && conn(r.provider);
+    if (!r || !provider) return null;
+    const fallbacks = (r.fallbacks ?? []).flatMap((f) => {
+      const p = conn(f.provider);
+      return p ? [{ provider: p, model: f.model }] : [];
+    });
+    return { provider, model: r.model, rule, fallbacks };
   };
 
   const name = requested || "";

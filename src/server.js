@@ -73,6 +73,26 @@ function clientKey(req) {
   return auth?.replace(/^Bearer\s+/i, "") || "";
 }
 
+/** Statuses that mean "try somewhere else": rate limits, quota, overload, outages. */
+const FALLBACK_STATUS = new Set([402, 408, 429, 500, 502, 503, 504, 529]);
+/** Of those, the ones that mean the target is capped for a while. */
+const QUOTA_STATUS = new Set([402, 429]);
+
+/** @param {{ provider: { id: string }, model: string }} t */
+const cooldownKey = (t) => `${t.provider.id}\n${t.model}`;
+
+/**
+ * How long to rank a capped target last: the provider's retry-after when it sends
+ * one, else a minute.
+ * ponytail: daily caps get re-probed once a minute; parse rate-limit-reset headers if that's too often.
+ *
+ * @param {string | null} retryAfter
+ */
+export function cooldownMs(retryAfter) {
+  const seconds = Number(retryAfter);
+  return retryAfter && Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 3600) * 1000 : 60_000;
+}
+
 /**
  * Create the gateway HTTP server (not yet listening).
  *
@@ -81,6 +101,8 @@ function clientKey(req) {
  */
 export function createGateway(config, { store, logger = silentLogger, fetchImpl = globalThis.fetch, activity = new Activity(), setupCode = "" }) {
   const admin = createAdmin({ config, store, activity, logger, fetchImpl, setupCode });
+  /** Rate-limited targets → when to stop ranking them last (ms). In memory: a restart forgets. */
+  const cooldowns = new Map();
 
   /**
    * Authenticate a Claude Code client. Before the first client key is created,
@@ -126,18 +148,89 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
     if (!route) {
       throw new GatewayError(503, "api_error", "No connection configured for this model. Add a connection and a default route in the gateway admin UI (/admin).");
     }
-    const { provider, model: upstreamModel } = route;
-    entry.provider = provider.name;
-    entry.upstreamModel = upstreamModel;
+    // The route's target, then its fallbacks. Targets cooling down after a rate
+    // limit go last, so a capped free tier isn't hit again on every request.
+    const now = Date.now();
+    const targets = [{ provider: route.provider, model: route.model }, ...route.fallbacks];
+    const cooling = (/** @type {typeof targets[0]} */ c) => (cooldowns.get(cooldownKey(c)) ?? 0) > now;
+    const ordered = [...targets.filter((c) => !cooling(c)), ...targets.filter(cooling)];
+    const coolingTargets = targets.filter(cooling);
+    // When everything is cooling down the order is unchanged, so there's nothing to note.
+    if (coolingTargets.length < targets.length) {
+      for (const c of coolingTargets) {
+        const secs = Math.ceil((cooldowns.get(cooldownKey(c)) - now) / 1000);
+        (entry.fallbacks ??= []).push(`${c.provider.name} / ${c.model}: rate-limited recently, moved to the back (for ${secs} s more)`);
+      }
+    }
 
-    const { payload, toolNames, thinkingRequested } = translateRequest(body, {
-      model: upstreamModel,
-      reasoning: isReasoningModel(upstreamModel, provider),
-      maxOutputTokens: provider.maxOutputTokens
+    // Client gone (e.g. Esc in Claude Code) → stop generating upstream tokens.
+    const clientGone = new AbortController();
+    res.on("close", () => {
+      if (!res.writableFinished) clientGone.abort(new Error("client disconnected"));
     });
-    entry.stream = payload.stream;
-    const ctx = { model: requestedModel || upstreamModel, toolNames, thinkingRequested };
-    const logFields = { requestId, key: entry.keyName, model: requestedModel, provider: provider.name, upstreamModel, stream: payload.stream };
+
+    let provider, upstreamModel, payload, ctx, logFields, upstream;
+    for (let i = 0; i < ordered.length; i++) {
+      const target = ordered[i];
+      const isLast = i === ordered.length - 1;
+      ({ provider, model: upstreamModel } = target);
+      entry.provider = provider.name;
+      entry.upstreamModel = upstreamModel;
+      const translated = translateRequest(body, {
+        model: upstreamModel,
+        reasoning: isReasoningModel(upstreamModel, provider),
+        maxOutputTokens: provider.maxOutputTokens
+      });
+      payload = translated.payload;
+      entry.stream = payload.stream;
+      ctx = { model: requestedModel || upstreamModel, toolNames: translated.toolNames, thinkingRequested: translated.thinkingRequested };
+      logFields = { requestId, key: entry.keyName, model: requestedModel, provider: provider.name, upstreamModel, stream: payload.stream };
+
+      /** Note why this target was passed over and move on. */
+      const fallOver = (/** @type {string} */ reason) => {
+        (entry.fallbacks ??= []).push(`${provider.name} / ${upstreamModel}: ${reason}`);
+        logger.warn("falling back to the next target", { ...logFields, reason, next: `${ordered[i + 1].provider.name} / ${ordered[i + 1].model}` });
+      };
+
+      try {
+        upstream = await postUpstream({
+          url: completionsUrl(provider),
+          headers: upstreamHeaders(provider, provider.apiKey),
+          payload,
+          parameterRetry: provider.parameterRetry,
+          signal: clientGone.signal,
+          timeoutMs: config.upstreamTimeoutMs,
+          // With somewhere else to go, switch at once instead of backing off here.
+          maxRetries: isLast ? config.maxRetries : 0,
+          fetchImpl,
+          logger,
+          requestId
+        });
+      } catch (err) {
+        if (clientGone.signal.aborted) {
+          entry.error = "client disconnected";
+          logger.info("client disconnected before upstream responded", logFields);
+          return;
+        }
+        if (isLast) throw err;
+        fallOver(/** @type {Error} */ (err).message);
+        continue;
+      }
+
+      const { response } = upstream;
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        const mapped = mapUpstreamError(response.status, text);
+        logger.warn("upstream error", { ...logFields, status: response.status, errorType: mapped.type, error: mapped.message.slice(0, 300) });
+        if (QUOTA_STATUS.has(response.status)) cooldowns.set(cooldownKey(target), Date.now() + cooldownMs(response.headers.get("retry-after")));
+        if (isLast || !FALLBACK_STATUS.has(response.status)) throw mapped;
+        fallOver(mapped.message.slice(0, 160));
+        continue;
+      }
+      // It answered, so any cooldown is over early.
+      cooldowns.delete(cooldownKey(target));
+      break;
+    }
 
     /** @param {{ input_tokens?: number, output_tokens?: number } | null | undefined} usage */
     const finish = (usage) => {
@@ -146,45 +239,10 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
       if (keyRecord) store.recordUsage(keyRecord.id, { inputTokens: entry.inputTokens, outputTokens: entry.outputTokens });
     };
 
-    // Client gone (e.g. Esc in Claude Code) → stop generating upstream tokens.
-    const clientGone = new AbortController();
-    res.on("close", () => {
-      if (!res.writableFinished) clientGone.abort(new Error("client disconnected"));
-    });
-
-    let upstream;
-    try {
-      upstream = await postUpstream({
-        url: completionsUrl(provider),
-        headers: upstreamHeaders(provider, provider.apiKey),
-        payload,
-        parameterRetry: provider.parameterRetry,
-        signal: clientGone.signal,
-        timeoutMs: config.upstreamTimeoutMs,
-        maxRetries: config.maxRetries,
-        fetchImpl,
-        logger,
-        requestId
-      });
-    } catch (err) {
-      if (clientGone.signal.aborted) {
-        entry.error = "client disconnected";
-        logger.info("client disconnected before upstream responded", logFields);
-        return;
-      }
-      throw err;
-    }
     const { response, controller, body: sentPayload } = upstream;
     // The upstream may have been retried without the parameters it rejected.
     for (const k of Object.keys(payload)) {
       if (!(k in sentPayload) && k !== "model" && k !== "messages") (entry.droppedParams ??= []).push(k);
-    }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const mapped = mapUpstreamError(response.status, text);
-      logger.warn("upstream error", { ...logFields, status: response.status, errorType: mapped.type, error: mapped.message.slice(0, 300) });
-      throw mapped;
     }
 
     if (!payload.stream) {

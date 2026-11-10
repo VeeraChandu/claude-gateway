@@ -1,6 +1,6 @@
 {
-  "name": "claude-code-gateway",
-  "version": "2.0.0",
+  "name": "claude-gateway",
+  "version": "2.1.0",
   "description": "Low-latency, zero-dependency gateway that runs Claude Code against OpenAI or any OpenAI-compatible provider",
   "type": "module",
   "main": "server.js",

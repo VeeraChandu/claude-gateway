@@ -40,11 +40,10 @@ test("seeds a new store from env, once", async () => {
   assert.ok(store.verifyClientKey("legacy-gateway-key-123"));
   assert.ok(await store.verifyAdminPassword("correct horse battery"));
 
-  // File is private and holds no plaintext client key.
+  // File is private; client keys are kept (to copy them again) but the admin password is only hashed.
   const stat = await fs.stat(file);
   assert.equal(stat.mode & 0o777, 0o600);
   const raw = await fs.readFile(file, "utf8");
-  assert.ok(!raw.includes("legacy-gateway-key-123"));
   assert.ok(!raw.includes("correct horse battery"));
 
   // Reopening ignores the seed: the store is the source of truth now.
@@ -98,13 +97,14 @@ test("routes: must reference existing connections; default required", async () =
   assert.equal(r.overrides.length, 1);
 });
 
-test("client keys: hashed, verified, revoked", async () => {
+test("client keys: verified by hash, copyable until revoked, never in the public view", async () => {
   const store = await memStore();
   assert.equal(store.hasActiveClientKeys(), false);
   const { key, secret } = await store.createClientKey("laptop");
   assert.match(secret, /^cgw_[A-Za-z0-9_-]{32}$/);
   assert.equal(key.prefix, secret.slice(0, 10));
-  assert.ok(!JSON.stringify(store.state).includes(secret));
+  assert.ok(!JSON.stringify(store.publicView()).includes(secret));
+  assert.equal(store.clientKeySecret(key.id), secret);
   assert.equal(store.verifyClientKey(secret)?.id, key.id);
   assert.equal(store.verifyClientKey(secret + "x"), null);
   assert.equal(store.verifyClientKey(""), null);
@@ -117,6 +117,7 @@ test("client keys: hashed, verified, revoked", async () => {
   assert.equal(store.requiresClientKey(), true);
   await store.revokeClientKey(key.id);
   assert.equal(store.verifyClientKey(secret), null);
+  assert.ok(!JSON.stringify(store.state).includes(secret), "revoking drops the stored key");
   assert.equal(store.hasActiveClientKeys(), false);
   await store.deleteClientKey(key.id);
   assert.equal(store.state.clientKeys.length, 0);
@@ -238,4 +239,17 @@ test("old store files without fable/models load with empty defaults", async () =
   assert.deepEqual(store.state.routes.models, []);
   assert.equal(store.state.routes.fable, null);
   await fs.rm(dir, { recursive: true });
+});
+
+test("routes: fallbacks are kept, validated, and count as using a connection", async () => {
+  const store = await Store.open({ file: "", logger: silentLogger });
+  const a = await store.addProvider({ name: "A", baseUrl: "http://a.test/v1", apiKey: "k", defaultModel: "m" });
+  const b = await store.addProvider({ name: "B", baseUrl: "http://b.test/v1", apiKey: "k" });
+  await store.setRoutes({ default: { provider: a.id, model: "m", fallbacks: [{ provider: b.id, model: "m2" }, { provider: "", model: "" }] } });
+  assert.deepEqual(store.state.routes.default, { provider: a.id, model: "m", fallbacks: [{ provider: b.id, model: "m2" }] }, "blank rows dropped");
+  await assert.rejects(store.deleteProvider(b.id), /used by a route/);
+  await assert.rejects(store.setRoutes({ default: { provider: a.id, model: "m", fallbacks: [{ provider: "nope", model: "x" }] } }), /does not exist/);
+  await assert.rejects(store.setRoutes({ default: { provider: a.id, model: "m", fallbacks: [{ provider: b.id, model: "" }] } }), /fallback 1 model/);
+  await store.setRoutes({ default: { provider: a.id, model: "m" } });
+  assert.equal("fallbacks" in store.state.routes.default, false, "no empty list stored");
 });

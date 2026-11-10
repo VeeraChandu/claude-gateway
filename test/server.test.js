@@ -214,6 +214,61 @@ test("upstream 429 is retried, then succeeds", async (t) => {
   assert.equal(s.requests.length, 2);
 });
 
+test("a rate-limited target falls back at once, and stays skipped while it cools down", async (t) => {
+  const s = await startStack(
+    (req, res) => {
+      res.writeHead(429, { "retry-after": "120", "content-type": "application/json" });
+      res.end('{"error":{"message":"free tier cap reached"}}');
+    },
+    { UPSTREAM_MAX_RETRIES: "3" }
+  );
+  t.after(() => s.close());
+  const backup = await fakeUpstream(streamOk);
+  t.after(() => backup.close());
+  const b = await s.store.addProvider({ name: "Backup", baseUrl: backup.url, apiKey: "backup-key" });
+  await s.store.setRoutes({ default: { provider: s.provider.id, model: "free-model", fallbacks: [{ provider: b.id, model: "paid-model" }] } });
+
+  const first = await post(s.base, "/v1/messages", hi);
+  assert.equal(first.status, 200);
+  await first.text();
+  assert.equal(s.requests.length, 1, "no backoff retries on the capped target when a fallback exists");
+  assert.equal(backup.requests[0].body.model, "paid-model");
+
+  await (await post(s.base, "/v1/messages", hi)).text();
+  assert.equal(s.requests.length, 1, "cooling down: the capped target isn't tried again");
+  assert.equal(backup.requests.length, 2);
+});
+
+test("fallbacks: 5xx falls over, 400 does not, and the last target's error is returned", async (t) => {
+  let reply = { status: 503, body: '{"error":{"message":"overloaded"}}' };
+  const s = await startStack((req, res) => {
+    res.writeHead(reply.status, { "content-type": "application/json" });
+    res.end(reply.body);
+  });
+  t.after(() => s.close());
+  let backupStatus = 200;
+  const backup = await fakeUpstream((req, res) => {
+    if (backupStatus === 200) return streamOk(req, res);
+    res.writeHead(backupStatus, { "content-type": "application/json" });
+    res.end('{"error":{"message":"backup down too"}}');
+  });
+  t.after(() => backup.close());
+  const b = await s.store.addProvider({ name: "Backup", baseUrl: backup.url, apiKey: "k" });
+  await s.store.setRoutes({ default: { provider: s.provider.id, model: "m", fallbacks: [{ provider: b.id, model: "m2" }] } });
+
+  assert.equal((await post(s.base, "/v1/messages", hi)).status, 200, "503 → fallback answers");
+
+  reply = { status: 400, body: '{"error":{"message":"bad request"}}' };
+  const bad = await post(s.base, "/v1/messages", hi);
+  assert.equal(bad.status, 400, "a client error is not retried elsewhere");
+  assert.equal(backup.requests.length, 1);
+
+  reply = { status: 503, body: '{"error":{"message":"overloaded"}}' };
+  backupStatus = 502;
+  const both = await post(s.base, "/v1/messages", hi);
+  assert.equal(both.status, 502, "all targets failed → the last one's error");
+});
+
 test("upstream errors map to Anthropic types; context overflow → prompt is too long", async (t) => {
   let reply;
   const s = await startStack((req, res) => {

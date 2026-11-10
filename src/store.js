@@ -21,9 +21,11 @@ import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "no
  * @property {boolean} parameterRetry    Retry once without parameters the provider rejected
  * @property {string} createdAt
  *
- * @typedef {{ provider: string, model: string }} Route
- * @typedef {{ match: string, provider: string, model: string }} RouteOverride
- * @typedef {{ id: string, displayName: string, description: string, provider: string, model: string }} CustomModel
+ * @typedef {{ provider: string, model: string }} Target
+ * @typedef {Target & { fallbacks?: Target[] }} Route
+ *   `fallbacks` are tried in order when the target is rate-limited or down.
+ * @typedef {Route & { match: string }} RouteOverride
+ * @typedef {Route & { id: string, displayName: string, description: string }} CustomModel
  *   A model of your own, listed on /v1/models so it appears in Claude Code's /model picker.
  * @typedef {{ default: Route | null, opus: Route | null, sonnet: Route | null, haiku: Route | null, fable: Route | null,
  *   models: CustomModel[], overrides: RouteOverride[] }} Routes
@@ -33,6 +35,8 @@ import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "no
  * @property {string} name
  * @property {string} prefix       First characters of the key, for recognition
  * @property {string} hash         sha256 of the full key
+ * @property {string} [secret]     The key itself, so the admin UI can copy it again. Kept beside the
+ *   provider API keys in the same 0600 file; missing on keys made before this was stored, and dropped on revoke.
  * @property {string} createdAt
  * @property {string | null} lastUsedAt
  * @property {string | null} revokedAt
@@ -224,6 +228,36 @@ function requireText(v, what, max = 80) {
   return s;
 }
 
+const MAX_FALLBACKS = 5;
+
+/**
+ * `{ fallbacks }` for a route, or `{}` when there are none, so stored routes stay
+ * unchanged for people who don't use them.
+ *
+ * @param {unknown} input
+ * @param {string} what
+ * @returns {{ fallbacks?: Target[] }}
+ */
+function normalizeFallbacks(input, what) {
+  const list = (Array.isArray(input) ? input : []).filter((/** @type {any} */ f) => f?.provider);
+  if (list.length > MAX_FALLBACKS) throw new StoreError(400, `${what} has more than ${MAX_FALLBACKS} fallbacks`);
+  const fallbacks = list.map((/** @type {any} */ f, i) => ({
+    provider: String(f.provider),
+    model: requireText(f.model, `${what} fallback ${i + 1} model`, 200)
+  }));
+  return fallbacks.length ? { fallbacks } : {};
+}
+
+/**
+ * Every connection+model a set of routes can send to, fallbacks included.
+ *
+ * @param {Routes} r
+ * @returns {Target[]}
+ */
+export function routeTargets(r) {
+  return [r.default, ...FAMILIES.map((f) => r[f]), ...r.models, ...r.overrides].flatMap((x) => (x ? [x, ...(x.fallbacks ?? [])] : []));
+}
+
 /**
  * @param {unknown} input
  * @returns {CustomModel[]}
@@ -245,7 +279,8 @@ function normalizeModels(input) {
       displayName: String(m.displayName ?? "").trim().slice(0, 80),
       description: String(m.description ?? "").trim().slice(0, 200),
       provider: requireText(m.provider, `Connection for ${id}`),
-      model: requireText(m.model, `Upstream model for ${id}`, 200)
+      model: requireText(m.model, `Upstream model for ${id}`, 200),
+      ...normalizeFallbacks(m.fallbacks, id)
     };
   });
 }
@@ -358,6 +393,7 @@ export class Store extends EventEmitter {
       name,
       prefix: secret.slice(0, 10),
       hash: sha256(secret).toString("hex"),
+      secret,
       createdAt: now(),
       lastUsedAt: null,
       revokedAt: null,
@@ -399,9 +435,8 @@ export class Store extends EventEmitter {
       if (names.has(key)) throw new StoreError(409, `A connection named "${p.name}" already exists`);
       names.add(key);
     }
-    const routes = [s.routes.default, ...FAMILIES.map((f) => s.routes[f]), ...s.routes.models, ...s.routes.overrides];
-    for (const r of routes) {
-      if (r && !ids.has(r.provider)) throw new StoreError(400, "A route points at a connection that does not exist");
+    for (const r of routeTargets(s.routes)) {
+      if (!ids.has(r.provider)) throw new StoreError(400, "A route points at a connection that does not exist");
     }
   }
 
@@ -490,8 +525,7 @@ export class Store extends EventEmitter {
   deleteProvider(id) {
     return this.#update((s) => {
       if (!s.providers.some((p) => p.id === id)) throw new StoreError(404, "Connection not found");
-      const r = s.routes;
-      if ([r.default, ...FAMILIES.map((f) => r[f]), ...r.models, ...r.overrides].some((x) => x?.provider === id)) {
+      if (routeTargets(s.routes).some((x) => x.provider === id)) {
         throw new StoreError(409, "This connection is used by a route. Change the routes first.");
       }
       s.providers = s.providers.filter((p) => p.id !== id);
@@ -505,7 +539,7 @@ export class Store extends EventEmitter {
     /** @param {any} r @param {string} what @returns {Route | null} */
     const route = (r, what) => {
       if (!r || !r.provider) return null;
-      return { provider: String(r.provider), model: requireText(r.model, `${what} model`, 200) };
+      return { provider: String(r.provider), model: requireText(r.model, `${what} model`, 200), ...normalizeFallbacks(r.fallbacks, what) };
     };
     return this.#update((s) => {
       const def = route(input.default, "Default");
@@ -520,7 +554,8 @@ export class Store extends EventEmitter {
         overrides: (Array.isArray(input.overrides) ? input.overrides : []).map((/** @type {any} */ o) => ({
           match: requireText(o.match, "Override model name", 200),
           provider: requireText(o.provider, "Override connection"),
-          model: requireText(o.model, "Override model", 200)
+          model: requireText(o.model, "Override model", 200),
+          ...normalizeFallbacks(o.fallbacks, `Override ${o.match}`)
         }))
       };
       return s.routes;
@@ -546,8 +581,27 @@ export class Store extends EventEmitter {
       const k = s.clientKeys.find((x) => x.id === id);
       if (!k) throw new StoreError(404, "Key not found");
       k.revokedAt ??= now();
+      delete k.secret; // a revoked key is never needed again
       return k;
     });
+  }
+
+  /** @param {string} id @param {unknown} name */
+  renameClientKey(id, name) {
+    return this.#update((s) => {
+      const k = s.clientKeys.find((x) => x.id === id);
+      if (!k) throw new StoreError(404, "Key not found");
+      k.name = requireText(name, "Key name", 60);
+      return k;
+    });
+  }
+
+  /** The full key, for copying from the admin UI. @param {string} id */
+  clientKeySecret(id) {
+    const k = this.#state.clientKeys.find((x) => x.id === id);
+    if (!k) throw new StoreError(404, "Key not found");
+    if (!k.secret) throw new StoreError(404, "This key was created before keys were kept, so it can't be shown again. Create a new key for the device.");
+    return k.secret;
   }
 
   /** @param {string} id */
@@ -636,7 +690,7 @@ export class Store extends EventEmitter {
     return {
       providers: s.providers.map((p) => ({ ...p, apiKey: undefined, apiKeyMasked: maskSecret(p.apiKey) })),
       routes: s.routes,
-      clientKeys: s.clientKeys.map((k) => ({ ...k, hash: undefined }))
+      clientKeys: s.clientKeys.map((k) => ({ ...k, hash: undefined, secret: undefined, copyable: Boolean(k.secret) }))
     };
   }
 }
