@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "strict": false,
+    "noEmit": true
+  },
+  "include": [
+    "server.js",
+    "src/**/*.js"
+  ],
+  "exclude": [
+    "src/admin/public"
+  ]
+}

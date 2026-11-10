@@ -1,7 +1,5 @@
-node_modules
-.git
-.env
-.DS_Store
-*.log
-test*.js
-run-claude.sh
+*
+!package.json
+!server.js
+!src
+!src/**

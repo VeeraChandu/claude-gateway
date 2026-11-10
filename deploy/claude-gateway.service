@@ -1,0 +1,42 @@
+# systemd unit for running the gateway on a Linux server.
+#
+#   sudo useradd --system --home /opt/claude-gateway --shell /usr/sbin/nologin claude-gateway
+#   sudo git clone <repo> /opt/claude-gateway && cd /opt/claude-gateway
+#   sudo cp .env.example .env && sudo editor .env
+#   sudo mkdir -p data && sudo chown -R claude-gateway: data .env && sudo chmod 600 .env
+#   sudo cp deploy/claude-gateway.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now claude-gateway
+#   journalctl -u claude-gateway | grep "setup code"
+[Unit]
+Description=Claude Code Gateway
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude-gateway
+Group=claude-gateway
+WorkingDirectory=/opt/claude-gateway
+ExecStart=/usr/bin/env node server.js
+Environment=LOG_FORMAT=json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+# Hardening: the gateway only needs to read its code and write ./data.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/claude-gateway/data
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

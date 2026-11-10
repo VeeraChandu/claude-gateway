@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm i --no-save typescript@5.6.3 @types/node@22.9.0
+      - run: npx tsc -p jsconfig.json
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t claude-gateway:ci .
+      - name: Container starts and passes its healthcheck
+        run: |
+          docker run -d --name gw -e OPENAI_API_KEY=x -e GATEWAY_API_KEY=ci-key-0123456789abcdef -p 8080:8080 claude-gateway:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw)" = healthy ] && exit 0
+            sleep 1
+          done
+          docker logs gw; exit 1
