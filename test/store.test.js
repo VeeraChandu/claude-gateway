@@ -234,10 +234,15 @@ test("custom picker models: validation and routing (checked before overrides and
 test("old store files without fable/models load with empty defaults", async () => {
   const { dir, file } = await tmpFile();
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify({ version: 1, providers: [], routes: { default: null, opus: null, sonnet: null, haiku: null, overrides: [] }, clientKeys: [], admin: { passwordHash: "" } }), { mode: 0o600 });
+  const oldProvider = { id: "prv_old", name: "Old", baseUrl: "http://old.test/v1", apiKey: "sk-old-123456", createdAt: "2026-01-01T00:00:00Z" };
+  await fs.writeFile(file, JSON.stringify({ version: 1, providers: [oldProvider], routes: { default: null, opus: null, sonnet: null, haiku: null, overrides: [] }, clientKeys: [], admin: { passwordHash: "" } }), { mode: 0o600 });
   const store = await Store.open({ file, logger: silentLogger });
   assert.deepEqual(store.state.routes.models, []);
   assert.equal(store.state.routes.fable, null);
+  const shown = store.publicView().providers[0];
+  assert.equal(shown.authScheme, "bearer", "the admin UI sees the same defaults the gateway uses");
+  assert.equal(shown.parameterRetry, true);
+  assert.equal(shown.apiKey, undefined);
   await fs.rm(dir, { recursive: true });
 });
 

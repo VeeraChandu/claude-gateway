@@ -177,6 +177,10 @@ export class StreamTranslator {
     const key = `tool:${openAiIndex}`;
     if (st.index === null) {
       if (!st.name) return; // wait until the name arrives
+      // Blocks must be strictly sequential and a closed block can't take more input. If a provider
+      // starts another tool call while one is still streaming (interleaved parallel calls), opening
+      // this one would close the other mid-arguments. Hold it whole; finish() sends it.
+      if (!this.finished && this.current?.key.startsWith("tool:")) return;
       st.index = this.#open(out, key, {
         type: "tool_use",
         id: st.id || newToolUseId(),
@@ -185,9 +189,9 @@ export class StreamTranslator {
       });
       this.sawToolCall = true;
     }
-    if (st.pendingArgs) {
-      // Providers stream tool calls one after another; if one interleaves anyway,
-      // deliver to its own index rather than lose arguments.
+    // Only into the open block: a delta for a closed block breaks the stream. (A tool's block closes
+    // early only if text or thinking arrives between its arguments, which providers don't do.)
+    if (st.pendingArgs && this.current?.key === key) {
       out.push([
         "content_block_delta",
         { type: "content_block_delta", index: st.index, delta: { type: "input_json_delta", partial_json: st.pendingArgs } }

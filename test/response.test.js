@@ -115,6 +115,22 @@ test("stream: text then two sequential tool calls with split arguments", () => {
   assert.equal(events.at(-2)[1].delta.stop_reason, "tool_use");
 });
 
+test("stream: interleaved parallel tool calls keep blocks sequential and arguments whole", () => {
+  const events = run([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "Bash", arguments: '{"comm' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, id: "c2", function: { name: "Read", arguments: '{"pa' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'and":"ls"}' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: 'th":"a"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] }
+  ]);
+  assertValidAnthropicStream(events, assert);
+  const args = (i) => events.filter(([n, d]) => n === "content_block_delta" && d.index === i).map(([, d]) => d.delta.partial_json).join("");
+  assert.equal(args(0), '{"command":"ls"}');
+  assert.equal(args(1), '{"path":"a"}');
+  const starts = events.filter(([n]) => n === "content_block_start").map(([, d]) => d.content_block.name);
+  assert.deepEqual(starts, ["Bash", "Read"]);
+});
+
 test("stream: tool name arriving after the id is not lost", () => {
   const events = run([
     { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { arguments: "" } }] } }] },

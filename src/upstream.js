@@ -29,7 +29,8 @@ export function unsupportedParams(payload, text) {
   haystack.push(text);
   const hay = haystack.filter((s) => typeof s === "string").join("\n").toLowerCase();
   if (!hay) return [];
-  return STRIPPABLE_KEYS.filter((k) => hay.includes(k));
+  // Whole names only: "stopped" or "stop_reason" must not count as rejecting `stop`.
+  return STRIPPABLE_KEYS.filter((k) => new RegExp(`(^|[^a-z0-9_])${k}([^a-z0-9_]|$)`).test(hay));
 }
 
 /**
@@ -150,6 +151,7 @@ export async function postUpstream({ url, headers, payload, signal, timeoutMs, m
         dropped = [...dropped, ...keys.filter((k) => k in body)];
         body = stripped;
         logger.warn("upstream rejected parameters; retrying without them", { requestId, dropped: dropped.join(", ") });
+        attempt--; // this retry fixes the request; it shouldn't use up a rate-limit / outage retry
         continue;
       }
       // Nothing recognizable to drop. Rebuild the response so the caller can read it.

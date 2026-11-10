@@ -52,6 +52,8 @@ test("unsupportedParams recognizes the fields a provider rejects", () => {
   // A 400 about something else must not be retried blindly.
   assert.deepEqual(unsupportedParams(undefined, `{"error":{"message":"Invalid API key"}}`), []);
   assert.deepEqual(unsupportedParams(undefined, "upstream is down"), []);
+  assert.deepEqual(unsupportedParams(undefined, `{"error":{"message":"generation stopped: bad stop_reason value"}}`), [], "words containing a name don't count");
+  assert.deepEqual(unsupportedParams(undefined, `{"error":{"message":"'stop' is not supported"}}`), ["stop"]);
 });
 
 test("withProviderDefaults fills in the newer fields for an old store record", () => {

@@ -688,7 +688,7 @@ export class Store extends EventEmitter {
   publicView() {
     const s = this.#state;
     return {
-      providers: s.providers.map((p) => ({ ...p, apiKey: undefined, apiKeyMasked: maskSecret(p.apiKey) })),
+      providers: s.providers.map((p) => ({ ...withProviderDefaults(p), apiKey: undefined, apiKeyMasked: maskSecret(p.apiKey) })),
       routes: s.routes,
       clientKeys: s.clientKeys.map((k) => ({ ...k, hash: undefined, secret: undefined, copyable: Boolean(k.secret) }))
     };

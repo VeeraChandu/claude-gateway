@@ -1330,7 +1330,8 @@ function viewRouting() {
     editor.modelInput.addEventListener("input", fromUpstream);
     // Picking from the list fires "change" instead of "input".
     editor.modelInput.addEventListener("change", fromUpstream);
-    const entry = { name, id, editor };
+    // The form has no description field; carry the saved one through so a save keeps it.
+    const entry = { name, id, editor, description: m?.description ?? "" };
     customModels.push(entry);
     modelsGroup.append(ruleRow("model", [h("div", { class: "match-pair" }, id, name), suggest, warn], editor, () => customModels.splice(customModels.indexOf(entry), 1)));
     // Existing rows get checked too, so a saved ID Desktop rejects is visible.
@@ -1369,7 +1370,7 @@ function viewRouting() {
         const payload = {
           default: def.value(),
           ...Object.fromEntries(families.map((f) => [f.id, f.editor.value()])),
-          models: customModels.map((m) => ({ ...m.editor.value(), id: m.id.value.trim(), displayName: m.name.value.trim() })),
+          models: customModels.map((m) => ({ ...m.editor.value(), id: m.id.value.trim(), displayName: m.name.value.trim(), description: m.description })),
           overrides: overrides.map((o) => ({ match: o.match.value.trim(), ...o.editor.value() }))
         };
         await act(save, () => api("PUT", "/routes", payload));

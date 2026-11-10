@@ -232,8 +232,11 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
       break;
     }
 
-    /** @param {{ input_tokens?: number, output_tokens?: number } | null | undefined} usage */
+    let recorded = false;
+    /** Record usage once, however many exit paths reach it. @param {{ input_tokens?: number, output_tokens?: number } | null | undefined} usage */
     const finish = (usage) => {
+      if (recorded) return;
+      recorded = true;
       entry.inputTokens = usage?.input_tokens ?? 0;
       entry.outputTokens = usage?.output_tokens ?? 0;
       if (keyRecord) store.recordUsage(keyRecord.id, { inputTokens: entry.inputTokens, outputTokens: entry.outputTokens });
@@ -246,7 +249,22 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
     }
 
     if (!payload.stream) {
-      const data = await response.json();
+      // UPSTREAM_TIMEOUT_MS only covers the headers; bound the body read the way streams are bounded.
+      const bodyTimer = setTimeout(() => controller.abort(new Error("upstream body timeout")), config.streamIdleTimeoutMs);
+      let data;
+      try {
+        data = await response.json();
+      } catch (err) {
+        if (clientGone.signal.aborted) {
+          entry.error = "client disconnected";
+          logger.info("client disconnected while reading the upstream body", logFields);
+          return;
+        }
+        const reason = controller.signal.aborted ? String(controller.signal.reason?.message) : /** @type {Error} */ (err).message;
+        throw new GatewayError(502, "api_error", `Upstream response failed: ${reason}`);
+      } finally {
+        clearTimeout(bodyTimer);
+      }
       const message = translateResponse(data, ctx);
       sendJson(res, 200, message);
       entry.stopReason = message.stop_reason;

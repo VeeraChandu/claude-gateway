@@ -269,6 +269,29 @@ test("fallbacks: 5xx falls over, 400 does not, and the last target's error is re
   assert.equal(both.status, 502, "all targets failed → the last one's error");
 });
 
+test("the rejected-parameter retry doesn't use up a rate-limit / outage retry", async (t) => {
+  const s = await startStack(
+    (req, res, body, n) => {
+      if (n === 1) {
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end('{"error":{"message":"Unsupported parameter: \'temperature\'"}}');
+      }
+      if (n === 2) {
+        res.writeHead(503, { "retry-after": "0", "content-type": "application/json" });
+        return res.end('{"error":{"message":"overloaded"}}');
+      }
+      streamOk(req, res);
+    },
+    { UPSTREAM_MAX_RETRIES: "1" }
+  );
+  t.after(() => s.close());
+  const res = await post(s.base, "/v1/messages", { ...hi, temperature: 0.5 });
+  assert.equal(res.status, 200);
+  await res.text();
+  assert.equal(s.requests.length, 3);
+  assert.equal("temperature" in s.requests[2].body, false);
+});
+
 test("upstream errors map to Anthropic types; context overflow → prompt is too long", async (t) => {
   let reply;
   const s = await startStack((req, res) => {
@@ -319,6 +342,22 @@ test("upstream dying mid-stream yields an error event, not a silent truncation",
   t.after(() => s.close());
   const events = parseAnthropicSse(await (await post(s.base, "/v1/messages", { messages: [], stream: true })).text());
   assert.equal(events.at(-1).event, "error");
+});
+
+test("non-streaming: an upstream body that stalls after the headers times out with 502", async (t) => {
+  const s = await startStack(
+    (req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"id":"x",'); // and never finish
+    },
+    { STREAM_IDLE_TIMEOUT_MS: "1000" }
+  );
+  t.after(() => s.close());
+  const started = Date.now();
+  const res = await post(s.base, "/v1/messages", { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.status, 502);
+  assert.match((await res.json()).error.message, /upstream body timeout/);
+  assert.ok(Date.now() - started < 5000);
 });
 
 test("client disconnect aborts the upstream request", async (t) => {
