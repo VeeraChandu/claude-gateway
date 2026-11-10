@@ -6,6 +6,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { GatewayError } from "../errors.js";
 import { StoreError, maskSecret } from "../store.js";
 import { resolveRoute } from "../models.js";
+import { modelsUrl, upstreamHeaders } from "../provider-request.js";
 import { isLocalNetworkAddress, isAllowedAdminHost } from "../net.js";
 import { isLoopback } from "../config.js";
 
@@ -93,14 +94,14 @@ function safeEqual(a, b) {
 /**
  * Fetch the provider's model list; doubles as a connection test.
  * @param {typeof fetch} fetchImpl
- * @param {string} baseUrl
- * @param {string} apiKey
+ * @param {Partial<import("../store.js").Provider>} provider  baseUrl, apiKey and the auth fields
  */
-export async function testConnection(fetchImpl, baseUrl, apiKey) {
+export async function testConnection(fetchImpl, provider) {
   const started = performance.now();
+  const url = modelsUrl({ baseUrl: String(provider.baseUrl ?? "").replace(/\/+$/, ""), queryParams: provider.queryParams ?? "" });
   try {
-    const res = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+    const res = await fetchImpl(url, {
+      headers: upstreamHeaders(provider, String(provider.apiKey ?? "")),
       signal: AbortSignal.timeout(10_000)
     });
     const latencyMs = Math.round(performance.now() - started);
@@ -297,9 +298,19 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
       const stored = body.id ? store.getProvider(String(body.id)) : null;
       if (body.id && !stored) throw new StoreError(404, "Connection not found");
       const baseUrl = String(body.baseUrl || stored?.baseUrl || "");
-      const apiKey = String(body.apiKey || stored?.apiKey || "");
       if (!/^https?:\/\//.test(baseUrl)) throw new StoreError(400, "Base URL must be an http(s) URL");
-      return json(res, 200, await testConnection(fetchImpl, baseUrl, apiKey));
+      return json(
+        res,
+        200,
+        await testConnection(fetchImpl, {
+          baseUrl,
+          // An empty key on the form means "keep the stored one".
+          apiKey: String(body.apiKey || stored?.apiKey || ""),
+          authScheme: body.authScheme ?? stored?.authScheme,
+          authHeader: body.authHeader ?? stored?.authHeader,
+          queryParams: body.queryParams ?? stored?.queryParams
+        })
+      );
     }
     let m = route.match(/^\/providers\/([\w-]+)(\/models)?$/);
     if (m) {
@@ -307,7 +318,7 @@ export function createAdmin({ config, store, activity, logger, fetchImpl, setupC
       if (models && method === "GET") {
         const p = store.getProvider(id);
         if (!p) throw new StoreError(404, "Connection not found");
-        return json(res, 200, await testConnection(fetchImpl, p.baseUrl, p.apiKey));
+        return json(res, 200, await testConnection(fetchImpl, p));
       }
       if (!models && method === "PATCH") return json(res, 200, providerView(await store.updateProvider(id, await readBody(req))));
       if (!models && method === "DELETE") {

@@ -15,6 +15,17 @@ const TABS = [
   ["settings", "Settings"]
 ];
 
+/**
+ * How the API key is sent. Most OpenAI-compatible providers want "bearer";
+ * Azure OpenAI wants its own "api-key" header.
+ */
+const AUTH_SCHEMES = [
+  { value: "bearer", label: "Authorization: Bearer (most providers)" },
+  { value: "x-api-key", label: "x-api-key header" },
+  { value: "header", label: "Custom header (Azure OpenAI)" },
+  { value: "none", label: "No credential (local server)" }
+];
+
 const PRESETS = [
   { label: "OpenAI", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { label: "Venice", name: "Venice", baseUrl: "https://api.venice.ai/api/v1" },
@@ -22,6 +33,7 @@ const PRESETS = [
   { label: "Groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
   { label: "OpenRouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
   { label: "Ollama (local)", name: "Ollama", baseUrl: "http://localhost:11434/v1" },
+  { label: "Azure OpenAI", name: "Azure OpenAI", baseUrl: "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT", authScheme: "header", authHeader: "api-key", queryParams: "api-version=2024-10-21" },
   { label: "Custom", name: "", baseUrl: "" }
 ];
 
@@ -369,7 +381,15 @@ function viewOverview() {
       h("td", { class: "nowrap mono" }, fmtTime(e.time)),
       h("td", { class: "nowrap" }, e.keyName || "—"),
       h("td", {}, h("div", {}, e.model || "—"), h("div", { class: "muted small" }, e.provider ? `→ ${e.provider} / ${e.upstreamModel}` : e.error || "")),
-      h("td", {}, h("span", { class: `badge ${e.status >= 400 || e.error ? "danger" : "ok"}` }, e.error && e.status < 400 ? "aborted" : e.status)),
+      h(
+        "td",
+        {},
+        h("span", { class: `badge ${e.status >= 400 || e.error ? "danger" : "ok"}` }, e.error && e.status < 400 ? "aborted" : e.status),
+        // The upstream refused these, so the gateway retried without them.
+        e.droppedParams?.length
+          ? h("div", { class: "muted small", title: `The provider rejected: ${e.droppedParams.join(", ")}` }, `−${e.droppedParams.join(", ")}`)
+          : null
+      ),
       h("td", { class: "nowrap hide-sm" }, e.stopReason || "—"),
       h("td", { class: "num" }, fmtNum(e.inputTokens)),
       h("td", { class: "num" }, fmtNum(e.outputTokens)),
@@ -431,6 +451,14 @@ function testResultView(result) {
   );
 }
 
+/** A short description of how a connection sends its key. */
+function authSchemeLabel(p) {
+  if (p.authScheme === "x-api-key") return "x-api-key header";
+  if (p.authScheme === "header") return `${p.authHeader || "api-key"} header`;
+  if (p.authScheme === "none") return "no credential";
+  return p.queryParams ? `Authorization: Bearer · ?${p.queryParams}` : "Authorization: Bearer";
+}
+
 function viewConnections() {
   const d = S.data;
   const add = h("button", { class: "primary", onclick: () => providerDialog() }, "Add connection");
@@ -490,6 +518,7 @@ function viewConnections() {
           h("div", {}, h("dt", {}, "API key"), h("dd", {}, p.apiKeyMasked)),
           h("div", {}, h("dt", {}, "Max output tokens"), h("dd", {}, p.maxOutputTokens ?? "no limit")),
           h("div", {}, h("dt", {}, "Reasoning models"), h("dd", {}, p.reasoningPattern || "built-in detection")),
+          h("div", {}, h("dt", {}, "Auth"), h("dd", {}, authSchemeLabel(p))),
           h("div", {}, h("dt", {}, "Added"), h("dd", {}, fmtDate(p.createdAt)))
         ),
         result
@@ -498,8 +527,7 @@ function viewConnections() {
   );
 }
 
-function providerDialog(existing) {
-  const isEdit = Boolean(existing);
+function providerDialog(existing) {  const isEdit = Boolean(existing);
   const needsDefault = !isEdit && !S.data.routes.default;
   const name = h("input", { value: existing?.name ?? "", required: true, maxlength: "80" });
   const baseUrl = h("input", { class: "mono", value: existing?.baseUrl ?? "", placeholder: "https://api.example.com/v1", required: true });
@@ -512,6 +540,24 @@ function providerDialog(existing) {
   });
   const maxTokens = h("input", { type: "number", min: "1", value: existing?.maxOutputTokens ?? "", placeholder: "No limit" });
   const pattern = h("input", { class: "mono", value: existing?.reasoningPattern ?? "", placeholder: "(^|/)(o\\d+(-|$)|gpt-5)|reasoner" });
+  const authScheme = h(
+    "select",
+    { onchange: () => (authHeaderRow.hidden = authScheme.value !== "header") },
+    AUTH_SCHEMES.map((s) => h("option", { value: s.value, selected: (existing?.authScheme ?? "bearer") === s.value }, s.label))
+  );
+  const authHeader = h("input", { class: "mono", value: existing?.authHeader ?? "", placeholder: "api-key" });
+  const authHeaderRow = h(
+    "label",
+    { hidden: (existing?.authScheme ?? "bearer") !== "header" },
+    "Auth header name",
+    h("span", { class: "hint" }, "Header the key is sent in. Azure OpenAI uses “api-key”."),
+    authHeader
+  );
+  const queryParams = h("input", { class: "mono", value: existing?.queryParams ?? "", placeholder: "api-version=2024-10-21" });
+  const parameterRetry = h("input", {
+    type: "checkbox",
+    checked: existing ? existing.parameterRetry !== false : true
+  });
   const listId = `models-${Math.random().toString(36).slice(2)}`;
   const datalist = h("datalist", { id: listId });
   const defaultModel = h("input", { class: "mono", list: listId, placeholder: "e.g. gpt-4.1", required: needsDefault });
@@ -526,6 +572,11 @@ function providerDialog(existing) {
             const p = PRESETS[Number(preset.value)];
             if (p.name && (!name.value || PRESETS.some((x) => x.name === name.value))) name.value = p.name;
             baseUrl.value = p.baseUrl;
+            // Presets may also fix the auth scheme (Azure needs api-key + ?api-version=).
+            authScheme.value = p.authScheme ?? "bearer";
+            authHeader.value = p.authHeader ?? "";
+            queryParams.value = p.queryParams ?? "";
+            authHeaderRow.hidden = authScheme.value !== "header";
             (p.baseUrl ? apiKey : baseUrl).focus();
           }
         },
@@ -539,7 +590,16 @@ function providerDialog(existing) {
     {
       type: "button",
       onclick: async () => {
-        const r = await act(test, () => api("POST", "/providers/test", { id: existing?.id, baseUrl: baseUrl.value, apiKey: apiKey.value }));
+        const r = await act(test, () =>
+          api("POST", "/providers/test", {
+            id: existing?.id,
+            baseUrl: baseUrl.value,
+            apiKey: apiKey.value,
+            authScheme: authScheme.value,
+            authHeader: authHeader.value,
+            queryParams: queryParams.value
+          })
+        );
         result.replaceChildren(testResultView(r));
         datalist.replaceChildren(...r.models.map((m) => h("option", { value: m })));
       }
@@ -561,7 +621,11 @@ function providerDialog(existing) {
           baseUrl: baseUrl.value,
           apiKey: apiKey.value,
           maxOutputTokens: maxTokens.value || null,
-          reasoningPattern: pattern.value
+          reasoningPattern: pattern.value,
+          authScheme: authScheme.value,
+          authHeader: authHeader.value,
+          queryParams: queryParams.value,
+          parameterRetry: parameterRetry.checked
         };
         if (needsDefault) body.defaultModel = defaultModel.value;
         try {
@@ -583,13 +647,32 @@ function providerDialog(existing) {
     needsDefault && h("label", {}, "Default model", h("span", { class: "hint" }, "All Claude Code requests go here until you set up routing. Test the connection to pick from a list."), defaultModel, datalist),
     h(
       "details",
-      { class: "advanced", open: Boolean(existing?.maxOutputTokens || existing?.reasoningPattern) },
+      {
+        class: "advanced",
+        open: Boolean(
+          existing &&
+            (existing.maxOutputTokens ||
+              existing.reasoningPattern ||
+              existing.authScheme !== "bearer" ||
+              existing.queryParams ||
+              existing.parameterRetry === false)
+        )
+      },
       h("summary", {}, "Advanced"),
       h(
         "div",
         { class: "form" },
         h("label", {}, "Max output tokens", h("span", { class: "hint" }, "Caps Claude Code's large max_tokens to what this provider accepts (gpt-4o: 16384)."), maxTokens),
-        h("label", {}, "Reasoning models (regex)", h("span", { class: "hint" }, "Models matching this get max_completion_tokens and no temperature. Empty uses built-in detection."), pattern)
+        h("label", {}, "Reasoning models (regex)", h("span", { class: "hint" }, "Models matching this get max_completion_tokens and no temperature. Empty uses built-in detection."), pattern),
+        h("label", {}, "Auth scheme", h("span", { class: "hint" }, "How the API key is sent. Most OpenAI-compatible providers use the default."), authScheme),
+        authHeaderRow,
+        h("label", {}, "Query parameters", h("span", { class: "hint" }, "Appended to every request URL, e.g. Azure's api-version. Leave empty for most providers."), queryParams),
+        h(
+          "label",
+          { class: "checkbox" },
+          parameterRetry,
+          h("span", {}, "Retry without parameters the provider rejects (recommended)")
+        )
       )
     ),
     h("div", { class: "row" }, test, result),

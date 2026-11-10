@@ -48,7 +48,7 @@ Served at `/admin` by the gateway itself (plain HTML/JS, no build step):
 | Page | |
 | :-- | :-- |
 | **Overview** | Requests, errors, and token totals; a live table of recent requests showing which key, model, connection, and upstream model each used, plus status, stop reason, tokens, and time to first token |
-| **Connections** | Add, edit, test, and delete providers. Each has its own API key, output-token cap, and reasoning-model pattern. Keys are write-only: the UI only ever shows `sk-…a9f2` |
+| **Connections** | Add, edit, test, and delete providers. Each has its own API key, auth scheme, output-token cap, and reasoning-model pattern. Keys are write-only: the UI only ever shows `sk-…a9f2` |
 | **Routing** | Connection + model per Claude family (Opus, Sonnet, Haiku, Fable); **your models**, any number of extra entries for Claude Code's `/model` picker; prefix overrides; and a "test a model name" resolver. Changes apply to the next request, with no restart |
 | **Client keys** | Create, revoke, and delete keys. Shows last use, request count, and token totals per key |
 | **Settings** | Change the admin password (signs out other sessions); server info |
@@ -118,6 +118,48 @@ The gateway holds your provider API keys, so anything that can use it can spend 
   - **Strict Content-Security-Policy:** no inline script, no framing. The UI builds its DOM with text
     nodes only, never from HTML strings.
 - **Request bodies are capped** (`MAX_BODY_MB`, default 32), and `/health` returns only `{"status":"ok"}`.
+
+## Which providers work
+
+Any provider that speaks `POST {baseUrl}/chat/completions`, streams SSE in OpenAI's chunk
+format, and supports function calling. That covers OpenAI, Venice, DeepSeek, Groq, OpenRouter,
+Together, Fireworks, Cerebras, Ollama, vLLM, llama.cpp, LM Studio and the rest.
+
+Three settings on a connection let it reach providers that deviate from the vanilla shape.
+They live under **Connections → Edit → Advanced**:
+
+| Setting | Use it for |
+| :-- | :-- |
+| **Auth scheme** | `Authorization: Bearer` (default), `x-api-key`, a header you name (**Azure OpenAI** uses `api-key`), or none for a local server |
+| **Query parameters** | A query string on every request, e.g. Azure's `api-version=2024-10-21` |
+| **Retry without rejected parameters** | On by default. When a provider answers 400 naming `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop` or `parallel_tool_calls`, the gateway drops just those and retries once |
+
+So Azure OpenAI is a normal connection:
+
+```
+Base URL         https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT
+Auth scheme      Custom header → api-key
+Query parameters api-version=2024-10-21
+```
+
+**What still won't work:** providers that don't expose a `/chat/completions` endpoint at all.
+Gemini and Vertex native (`generateContent`, `?key=`), and Bedrock (SigV4 signing) are separate
+protocols, not OpenAI-compatible variants — point the gateway at a provider that speaks OpenAI,
+or at a translating proxy for those. PDF `document` blocks also translate to an OpenAI `file`
+part that most OpenAI-compatible servers don't implement; text documents always work.
+
+### When a provider rejects a parameter
+
+OpenAI-compatible implementations disagree about which fields they accept. Rather than making you
+find the right **Reasoning models** pattern by trial and error, the gateway handles it: a 400 that
+names one of the parameters above is retried once without it, and the retry is logged.
+
+```json
+{"level":"warn","msg":"upstream rejected parameters; retrying without them","dropped":"temperature, top_p"}
+```
+
+The parameters dropped are recorded on the request in **Overview** and in the log line for the
+completed request. Turn the behavior off per connection if you'd rather see the provider's error.
 
 ## Configuration
 
@@ -301,7 +343,8 @@ Model discovery needs the gateway reachable at `inferenceGatewayBaseUrl` when th
 | Symptom | Fix |
 | :-- | :-- |
 | `400 … max_tokens is too large` | Set the connection's **Max output tokens** to the model's limit |
-| `400 … temperature / max_tokens unsupported` | Set the connection's **Reasoning models** pattern to match it |
+| `400 … temperature / max_tokens unsupported` | Handled automatically (the gateway retries without them). Set the connection's **Reasoning models** pattern only if you want to avoid the first 400 |
+| `401 … from an Azure endpoint` | Set the connection's **Auth scheme** to a custom header named `api-key`, and add `api-version=…` under **Query parameters** |
 | `401 Missing / invalid client key` | Set `ANTHROPIC_API_KEY` to an active key from **Client keys** |
 | `503 No connection configured` | Add a connection and a default route in the admin UI |
 | `/admin` returns 404 from another machine | It's only served to local, private, and Tailscale addresses (`ADMIN_ALLOW_FROM`) |
@@ -334,7 +377,8 @@ src/server.js          HTTP routing, client auth, body limits, streaming pipelin
 src/admin/             admin API (sessions, CSRF/Host/IP checks) and the UI in public/
 src/net.js             address and Host header checks
 src/activity.js        recent-request log and totals
-src/upstream.js        upstream calls: timeouts, retries, cancellation
+src/upstream.js        upstream calls: timeouts, retries, cancellation, parameter-rejection retry
+src/provider-request.js  how a connection is addressed: URL, auth header, query parameters
 src/translate/         request / response / stream translation, tool-name mapping
 src/errors.js          upstream → Anthropic error mapping
 src/sse.js             SSE parsing

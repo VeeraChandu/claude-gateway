@@ -7,6 +7,7 @@ import { resolveRoute, isReasoningModel } from "./models.js";
 import { translateRequest } from "./translate/request.js";
 import { translateResponse, StreamTranslator } from "./translate/response.js";
 import { postUpstream } from "./upstream.js";
+import { completionsUrl, upstreamHeaders } from "./provider-request.js";
 import { sseData } from "./sse.js";
 import { estimateInputTokens } from "./tokens.js";
 import { silentLogger } from "./logger.js";
@@ -154,9 +155,10 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
     let upstream;
     try {
       upstream = await postUpstream({
-        url: `${provider.baseUrl}/chat/completions`,
-        apiKey: provider.apiKey,
+        url: completionsUrl(provider),
+        headers: upstreamHeaders(provider, provider.apiKey),
         payload,
+        parameterRetry: provider.parameterRetry,
         signal: clientGone.signal,
         timeoutMs: config.upstreamTimeoutMs,
         maxRetries: config.maxRetries,
@@ -172,7 +174,11 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
       }
       throw err;
     }
-    const { response, controller } = upstream;
+    const { response, controller, body: sentPayload } = upstream;
+    // The upstream may have been retried without the parameters it rejected.
+    for (const k of Object.keys(payload)) {
+      if (!(k in sentPayload) && k !== "model" && k !== "messages") (entry.droppedParams ??= []).push(k);
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -193,7 +199,8 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
         durationMs: Math.round(performance.now() - started),
         stopReason: message.stop_reason,
         inputTokens: entry.inputTokens,
-        outputTokens: entry.outputTokens
+        outputTokens: entry.outputTokens,
+        ...(entry.droppedParams ? { droppedParams: entry.droppedParams.join(", ") } : {})
       });
       return;
     }
@@ -249,7 +256,8 @@ export function createGateway(config, { store, logger = silentLogger, fetchImpl 
         durationMs: Math.round(performance.now() - started),
         stopReason: entry.stopReason,
         inputTokens: entry.inputTokens,
-        outputTokens: entry.outputTokens
+        outputTokens: entry.outputTokens,
+        ...(entry.droppedParams ? { droppedParams: entry.droppedParams.join(", ") } : {})
       });
     } catch (err) {
       finish(translator.usage);

@@ -15,6 +15,10 @@ import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "no
  * @property {string} apiKey
  * @property {number | null} maxOutputTokens
  * @property {string} reasoningPattern   Regex source; "" = gateway default
+ * @property {AuthScheme} authScheme     How the API key is sent
+ * @property {string} authHeader         Header name when authScheme is "header"
+ * @property {string} queryParams        Appended to every request URL, e.g. "api-version=2024-10-21"
+ * @property {boolean} parameterRetry    Retry once without parameters the provider rejected
  * @property {string} createdAt
  *
  * @typedef {{ provider: string, model: string }} Route
@@ -52,6 +56,16 @@ export class StoreError extends Error {
 }
 
 export const FAMILIES = /** @type {const} */ (["opus", "sonnet", "haiku", "fable"]);
+
+/**
+ * How a connection's API key is sent.
+ * - `bearer`   `Authorization: Bearer <key>` (default, what most providers want)
+ * - `x-api-key`  `x-api-key: <key>`
+ * - `header`   a header you name yourself (e.g. Azure's `api-key`)
+ * - `none`     no credential (a local server that needs none)
+ * @typedef {"bearer" | "x-api-key" | "header" | "none"} AuthScheme
+ */
+export const AUTH_SCHEMES = /** @type {const} */ (["bearer", "x-api-key", "header", "none"]);
 
 /**
  * Claude Code only adds discovered models whose id contains "claude" or
@@ -140,6 +154,66 @@ function normalizePattern(v) {
     throw new StoreError(400, "Reasoning model pattern must be a valid regular expression");
   }
   return s;
+}
+
+/** @param {unknown} v @returns {AuthScheme} */
+function normalizeAuthScheme(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "bearer";
+  if (!AUTH_SCHEMES.includes(/** @type {any} */ (s))) {
+    throw new StoreError(400, `Auth scheme must be one of ${AUTH_SCHEMES.join(", ")}`);
+  }
+  return /** @type {AuthScheme} */ (s);
+}
+
+/**
+ * A header name for `authScheme: "header"`. Restricted to characters that are
+ * legal in a token, so it can never inject a header or split a request.
+ * @param {unknown} v
+ */
+function normalizeAuthHeader(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(s)) {
+    throw new StoreError(400, "Auth header name may only contain letters, digits and hyphens");
+  }
+  return s;
+}
+
+/**
+ * A query string appended to every request URL, e.g. Azure's
+ * `api-version=2024-10-21`. Leading `?` and `&` are accepted and stripped; the
+ * value is percent-encoded as one parameter pair per `&`.
+ * @param {unknown} v
+ */
+function normalizeQueryParams(v) {
+  const s = String(v ?? "").trim().replace(/^[?&]+/, "");
+  if (!s) return "";
+  if (s.length > 1024) throw new StoreError(400, "Query parameters must be at most 1024 characters");
+  try {
+    // Throws on a lone "%" or a malformed escape, which would break URL building.
+    new URLSearchParams(s);
+  } catch {
+    throw new StoreError(400, "Query parameters must be a valid query string, e.g. api-version=2024-10-21");
+  }
+  return s;
+}
+
+/**
+ * A provider as the rest of the gateway sees it: every newer field present,
+ * whatever shape the record on disk is in. Older store files predate these
+ * fields, so they are filled from the defaults instead of leaving `undefined`.
+ * @param {any} p
+ * @returns {Provider}
+ */
+export function withProviderDefaults(p) {
+  return {
+    ...p,
+    authScheme: AUTH_SCHEMES.includes(p?.authScheme) ? p.authScheme : "bearer",
+    authHeader: typeof p?.authHeader === "string" ? p.authHeader : "",
+    queryParams: typeof p?.queryParams === "string" ? p.queryParams : "",
+    parameterRetry: p?.parameterRetry === false ? false : true
+  };
 }
 
 /** @param {unknown} v @param {string} what */
@@ -257,6 +331,10 @@ export class Store extends EventEmitter {
         apiKey: seed.apiKey,
         maxOutputTokens: seed.maxOutputTokens,
         reasoningPattern: seed.reasoningPattern,
+        authScheme: /** @type {AuthScheme} */ ("bearer"),
+        authHeader: "",
+        queryParams: "",
+        parameterRetry: true,
         createdAt: now()
       };
       s.providers.push(provider);
@@ -288,8 +366,12 @@ export class Store extends EventEmitter {
   }
 
   /** Current state. Treat as read-only; it is replaced (not mutated) on update. */
+  /**
+   * The live state. Providers are passed through `withProviderDefaults`, so a
+   * record written by an older version of the gateway still has every field.
+   */
   get state() {
-    return this.#state;
+    return { ...this.#state, providers: this.#state.providers.map(withProviderDefaults) };
   }
 
   /**
@@ -352,12 +434,17 @@ export class Store extends EventEmitter {
 
   /** @param {string} id */
   getProvider(id) {
-    return this.#state.providers.find((p) => p.id === id) ?? null;
+    const p = this.#state.providers.find((x) => x.id === id);
+    return p ? withProviderDefaults(p) : null;
   }
 
   /** @param {any} input */
   addProvider(input) {
     return this.#update((s) => {
+      const authScheme = normalizeAuthScheme(input.authScheme);
+      if (authScheme === "header" && !normalizeAuthHeader(input.authHeader)) {
+        throw new StoreError(400, "Name the header to send the key in (for Azure OpenAI this is “api-key”)");
+      }
       const provider = {
         id: newId("prv"),
         name: requireText(input.name, "Name"),
@@ -365,6 +452,10 @@ export class Store extends EventEmitter {
         apiKey: requireText(input.apiKey, "API key", 4096),
         maxOutputTokens: normalizeMaxTokens(input.maxOutputTokens),
         reasoningPattern: normalizePattern(input.reasoningPattern),
+        authScheme: normalizeAuthScheme(input.authScheme),
+        authHeader: normalizeAuthHeader(input.authHeader),
+        queryParams: normalizeQueryParams(input.queryParams),
+        parameterRetry: input.parameterRetry === false ? false : true,
         createdAt: now()
       };
       s.providers.push(provider);
@@ -384,6 +475,13 @@ export class Store extends EventEmitter {
       if (patch.apiKey) p.apiKey = requireText(patch.apiKey, "API key", 4096);
       if (patch.maxOutputTokens !== undefined) p.maxOutputTokens = normalizeMaxTokens(patch.maxOutputTokens);
       if (patch.reasoningPattern !== undefined) p.reasoningPattern = normalizePattern(patch.reasoningPattern);
+      if (patch.authScheme !== undefined) p.authScheme = normalizeAuthScheme(patch.authScheme);
+      if (patch.authHeader !== undefined) p.authHeader = normalizeAuthHeader(patch.authHeader);
+      if (patch.queryParams !== undefined) p.queryParams = normalizeQueryParams(patch.queryParams);
+      if (patch.parameterRetry !== undefined) p.parameterRetry = patch.parameterRetry !== false;
+      if (p.authScheme === "header" && !p.authHeader) {
+        throw new StoreError(400, "Name the header to send the key in (for Azure OpenAI this is “api-key”)");
+      }
       return p;
     });
   }
